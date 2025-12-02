@@ -354,11 +354,24 @@ export default function Dashboard() {
   const [saving, setSaving] = useState(false);
   const [pendingMergedRows, setPendingMergedRows] = useState(null);
   const [showMergeModal, setShowMergeModal] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 8;
+  const [incompleteRows, setIncompleteRows] = useState([]);
+  const [completeRows, setCompleteRows] = useState([]);
+  const [rowToFix, setRowToFix] = useState(null);
+  const [editingIndex, setEditingIndex] = useState(null);
 
   const REQUIRED_FIELDS = useMemo(
     () => ["patient_name", "phone", "appointment_reason", "appointment_day"],
     []
   );
+
+  // Helper to get missing fields for a single row
+  const getRowMissingFields = (row) => {
+    return REQUIRED_FIELDS.filter(
+      (f) => !row[f] || String(row[f]).trim() === ""
+    );
+  };
 
   useEffect(() => {
     const token = localStorage.getItem("session_token");
@@ -441,6 +454,8 @@ export default function Dashboard() {
       setMergedRows([]);
       setMissingFields(REQUIRED_FIELDS);
       setUploadStep(1);
+      setIncompleteRows([]);
+      setCompleteRows([]);
       return;
     }
 
@@ -464,7 +479,10 @@ export default function Dashboard() {
 
         if (!existing) {
           // new row
-          const newRow = { ...row };
+          const newRow = { 
+            id: crypto.randomUUID(),   // <---- ADD THIS
+            ...row 
+          };
           merged.push(newRow);
           // add all keys to index
           keyCandidates(newRow).forEach((k) => index.set(k, newRow));
@@ -527,6 +545,22 @@ export default function Dashboard() {
 
     setMergedRows(unique);
     setMissingFields(Array.from(missingOverall));
+
+    // Build complete and incomplete rows lists
+    const incomplete = [];
+    const complete = [];
+
+    unique.forEach(row => {
+      const missing = getRowMissingFields(row);
+      if (missing.length > 0) {
+        incomplete.push({ ...row, missing, _id: row.id });
+      } else {
+        complete.push(row);
+      }
+    });
+
+    setIncompleteRows(incomplete);
+    setCompleteRows(complete);
 
     if (missingOverall.size === 0) {
       setUploadStep(3); // ready to preview/confirm
@@ -617,6 +651,9 @@ export default function Dashboard() {
     setMissingFields(REQUIRED_FIELDS);
     setMergeError("");
     setUploadStep(1);
+    setIncompleteRows([]);
+    setCompleteRows([]);
+    setRowToFix(null);
   };
 
   const handleCSVUpload = async (e) => {
@@ -723,43 +760,153 @@ export default function Dashboard() {
     setAppointments(data);
   };
 
-  const confirmAndSave = async () => {
-    if (!mergedRows.length) return;
-    if (missingFields.length) {
-      alert(
-        `Cannot save yet. Missing fields: ${missingFields.join(", ")}`
+  const saveFixedRow = (updatedRow) => {
+    if (editingIndex === null) return;
+
+    const newMerged = [...mergedRows];
+
+    // Update the real row
+    newMerged[editingIndex] = {
+      ...newMerged[editingIndex],
+      ...updatedRow
+    };
+
+    // Recompute missing fields row-by-row
+    const newComplete = [];
+    const newIncomplete = [];
+    const overallMissing = new Set();
+
+    newMerged.forEach((row) => {
+      const missing = REQUIRED_FIELDS.filter(
+        (f) => !row[f] || String(row[f]).trim() === ""
       );
+
+      if (missing.length === 0) {
+        newComplete.push(row);
+      } else {
+        newIncomplete.push({ ...row, missing, _id: row.id });
+        missing.forEach((m) => overallMissing.add(m));
+      }
+    });
+
+    // Update the state
+    setMergedRows(newMerged);
+    setCompleteRows(newComplete);
+    setIncompleteRows(newIncomplete);
+
+    // 🔥 This is the missing piece: update missingFields + uploadStep
+    const missingFieldsArray = Array.from(overallMissing);
+    setMissingFields(missingFieldsArray);
+
+    if (missingFieldsArray.length === 0) {
+      setUploadStep(3); // all required fields complete → ready to save
+    } else {
+      setUploadStep(2);
+    }
+
+    // Close modal
+    setRowToFix(null);
+    setEditingIndex(null);
+  };
+
+  const runPendingCalls = async () => {
+    const { data: pending, error } = await supabase
+      .from("appointments")
+      .select("*")
+      .eq("clinic_id", clinic.id)
+      .eq("status", "pending");
+
+    if (!pending?.length) {
+      alert("No pending appointments.");
       return;
     }
+
+    let success = 0;
+    let failed = 0;
+
+    for (const appt of pending) {
+      try {
+        const response = await fetch("/.netlify/functions/manual-call", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ appointmentId: appt.id }),
+        });
+
+        if (!response.ok) failed++;
+        else success++;
+      } catch (e) {
+        failed++;
+      }
+    }
+
+    alert(`Calls started: ${success}, Failed triggers: ${failed}`);
+  };
+
+  const confirmAndSave = async () => {
+    if (!mergedRows.length) return;
+
+    // Must have at least 1 complete row
+    if (completeRows.length === 0) {
+      alert("All rows are missing required fields. Fix them before saving.");
+      return;
+    }
+
+    // If some rows are incomplete → warn user
+    if (incompleteRows.length > 0) {
+      const ok = confirm(
+        `${incompleteRows.length} row(s) still missing required fields.\n\n` +
+        `Do you want to save ONLY the ${completeRows.length} complete rows?`
+      );
+      if (!ok) return;
+    }
+
     if (mergeError) {
       alert("Fix merge error before saving.");
       return;
     }
 
     setSaving(true);
-    try {
-      const payload = mergedRows.map((r) => {
-        // build a single datetime if you only have day + time
-        let apptTime = r.appointment_time;
 
-        if (!apptTime && r.appointment_day) {
-          // if appointment_time missing, store day-only at midnight
-          // (or you can combine with r.appointment_time if you keep time separately)
-          apptTime = `${r.appointment_day}T00:00`;
+    try {
+      const payload = completeRows.map((r) => {
+        let apptTime = r.appointment_time || null;
+
+        // Fix corrupted strings like "V04:45 PM"
+        if (apptTime && typeof apptTime === "string") {
+          apptTime = apptTime.replace(/^[^\d]*/, ""); // remove leading non-numeric chars
         }
+
+        // Ensure we have a valid date+time
+        const apptDay = r.appointment_day || null;
+
+        // If we have a day but time is missing or invalid, default to 09:00
+        if (apptDay) {
+          if (!apptTime || !/^\d{1,2}:\d{2}/.test(apptTime)) {
+            apptTime = "09:00 AM";
+          }
+        }
+
+        let fullTimestamp = null;
+        if (apptDay && apptTime) {
+          fullTimestamp = `${apptDay} ${apptTime}`;
+        }
+
+        console.log("FINAL ROW:", r);
+        console.log("TIMESTAMP:", fullTimestamp);
 
         return {
           clinic_id: clinic.id,
           patient_name: r.patient_name || null,
           phone: r.phone || null,
           doctor_name: r.doctor_name || null,
-          appointment_time: apptTime || null,
-
-          // OPTIONAL: store reason somewhere that DOES exist
+          appointment_day: apptDay,
+          appointment_time: fullTimestamp, // final corrected timestamp
           summary: r.appointment_reason || null,
-          status: "pending",
+          status: "pending"
         };
       });
+
+      console.log("FINAL PAYLOAD:", JSON.stringify(payload, null, 2));
 
       const { error } = await supabase
         .from("appointments")
@@ -769,7 +916,9 @@ export default function Dashboard() {
         console.log("SUPABASE INSERT ERROR:", error);
         alert("Insert failed. Check console.");
       } else {
-        alert("Appointments uploaded successfully!");
+        alert("Appointments uploaded!");
+
+        // Reset state
         resetUploads();
 
         const { data } = await supabase
@@ -777,6 +926,7 @@ export default function Dashboard() {
           .select("*")
           .eq("clinic_id", clinic.id)
           .order("created_at", { ascending: false });
+
         setAppointments(data || []);
       }
     } finally {
@@ -784,8 +934,16 @@ export default function Dashboard() {
     }
   };
 
-  // tiny preview slice
-  const previewRows = useMemo(() => mergedRows.slice(0, 8), [mergedRows]);
+  // Pagination logic
+  const totalPages = Math.ceil(mergedRows.length / itemsPerPage);
+  const startIndex = (currentPage - 1) * itemsPerPage;
+  const endIndex = startIndex + itemsPerPage;
+  const previewRows = useMemo(() => mergedRows.slice(startIndex, endIndex), [mergedRows, startIndex, endIndex]);
+
+  // Reset to page 1 when mergedRows changes
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [mergedRows.length]);
 
   if (loading) {
     return (
@@ -939,7 +1097,6 @@ export default function Dashboard() {
                 onClick={confirmAndSave}
                 disabled={
                   uploadStep !== 3 ||
-                  !!missingFields.length ||
                   !!mergeError ||
                   saving
                 }
@@ -1087,21 +1244,121 @@ export default function Dashboard() {
                         </td>
                       </tr>
                     ))}
-                    {mergedRows.length > previewRows.length && (
-                      <tr>
-                        <td
-                          colSpan={6}
-                          style={{
-                            padding: "0.6rem",
-                            color: "var(--muted-foreground)",
-                          }}
-                        >
-                          Showing {previewRows.length} of {mergedRows.length} rows
-                        </td>
-                      </tr>
-                    )}
                   </tbody>
                 </table>
+              </div>
+            )}
+
+            {/* Missing Info Table */}
+            {incompleteRows.length > 0 && (
+              <div style={{ marginTop: "1.5rem" }}>
+                <h3 style={{ fontWeight: 600, marginBottom: 8 }}>
+                  Rows With Missing Information ({incompleteRows.length})
+                </h3>
+
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr style={{ background: "var(--muted)" }}>
+                      <th style={{ padding: "8px" }}>Patient</th>
+                      <th style={{ padding: "8px" }}>Phone</th>
+                      <th style={{ padding: "8px" }}>Reason</th>
+                      <th style={{ padding: "8px" }}>Date</th>
+                      <th style={{ padding: "8px" }}>Missing Fields</th>
+                      <th style={{ padding: "8px" }}>Fix</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {incompleteRows.map((r, idx) => (
+                      <tr key={idx}>
+                        <td style={{ padding: "8px" }}>{r.patient_name || "—"}</td>
+                        <td style={{ padding: "8px" }}>{r.phone || "—"}</td>
+                        <td style={{ padding: "8px" }}>{r.appointment_reason || "—"}</td>
+                        <td style={{ padding: "8px" }}>{r.appointment_day || "—"}</td>
+                        <td style={{ padding: "8px", color: "red" }}>
+                          {r.missing.join(", ")}
+                        </td>
+                        <td style={{ padding: "8px" }}>
+                          <button
+                            className="button"
+                            onClick={() => {
+                              setRowToFix({ ...r, _id: r._id }); // <-- ensure _id is preserved
+                              const mergedIndex = mergedRows.findIndex(mr => mr.id === r._id);
+                              setEditingIndex(mergedIndex);
+                            }}
+                          >
+                            Fix
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Pagination Controls */}
+            {mergedRows.length > itemsPerPage && (
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  marginTop: "1rem",
+                  padding: "0.75rem",
+                  border: "1px solid var(--border)",
+                  borderRadius: "var(--radius)",
+                  background: "var(--muted)",
+                }}
+              >
+                <button
+                  onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                  disabled={currentPage === 1}
+                  style={{
+                    padding: "0.5rem 1rem",
+                    background: currentPage === 1 ? "var(--muted)" : "var(--primary)",
+                    color: currentPage === 1 ? "var(--muted-foreground)" : "var(--primary-foreground)",
+                    border: "1px solid var(--border)",
+                    borderRadius: "var(--radius)",
+                    cursor: currentPage === 1 ? "not-allowed" : "pointer",
+                    fontSize: "0.875rem",
+                    fontWeight: "500",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.5rem",
+                    opacity: currentPage === 1 ? 0.5 : 1,
+                  }}
+                >
+                  ← Previous
+                </button>
+                <span
+                  style={{
+                    color: "var(--foreground)",
+                    fontSize: "0.875rem",
+                    fontWeight: "500",
+                  }}
+                >
+                  Page {currentPage} of {totalPages} ({mergedRows.length} total rows)
+                </span>
+                <button
+                  onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+                  disabled={currentPage === totalPages}
+                  style={{
+                    padding: "0.5rem 1rem",
+                    background: currentPage === totalPages ? "var(--muted)" : "var(--primary)",
+                    color: currentPage === totalPages ? "var(--muted-foreground)" : "var(--primary-foreground)",
+                    border: "1px solid var(--border)",
+                    borderRadius: "var(--radius)",
+                    cursor: currentPage === totalPages ? "not-allowed" : "pointer",
+                    fontSize: "0.875rem",
+                    fontWeight: "500",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.5rem",
+                    opacity: currentPage === totalPages ? 0.5 : 1,
+                  }}
+                >
+                  Next →
+                </button>
               </div>
             )}
           </div>
@@ -1118,6 +1375,14 @@ export default function Dashboard() {
           >
             Recent Appointments
           </h3>
+
+          <button
+            className="button"
+            onClick={runPendingCalls}
+            style={{ marginTop: 20 }}
+          >
+            Run Pending Calls
+          </button>
 
           <div
             style={{
@@ -1278,6 +1543,72 @@ export default function Dashboard() {
         onClose={() => setSelectedAppointment(null)}
       />
 
+      {/* Fix Missing Information Modal */}
+      {rowToFix && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: "rgba(0,0,0,0.5)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000
+          }}
+        >
+          <div
+            style={{
+              background: "white",
+              padding: "1.5rem",
+              borderRadius: 8,
+              width: 400
+            }}
+          >
+            <h3 style={{ marginBottom: 10 }}>Fix Missing Fields</h3>
+
+            {rowToFix.missing.map((field) => (
+              <div key={field} style={{ marginBottom: 12 }}>
+                <label>{field}</label>
+                <input
+                  type="text"
+                  style={{
+                    width: "100%",
+                    padding: 8,
+                    marginTop: 4,
+                    border: "1px solid #ccc"
+                  }}
+                  value={rowToFix[field] || ""}
+                  onChange={(e) =>
+                    setRowToFix({ ...rowToFix, [field]: e.target.value })
+                  }
+                />
+              </div>
+            ))}
+
+            <button
+              className="button"
+              onClick={() => saveFixedRow(rowToFix)}
+            >
+              Save
+            </button>
+
+            <button
+              className="button"
+              style={{ marginLeft: 8 }}
+              onClick={() => {
+                setRowToFix(null);
+                setEditingIndex(null);
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* EMR MODE */}
       {clinic.integration_type === "emr" && (
         <div className="card">
@@ -1317,3 +1648,4 @@ export default function Dashboard() {
     </div>
   );
 }
+
