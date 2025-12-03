@@ -6,6 +6,16 @@ import AppointmentDetailsModal from "./components/AppointmentDetailsModal";
 import MergeModal from "./components/MergeModal";
 import "./index.css";
 
+// Hash token using Web Crypto API (browser-compatible)
+async function hashToken(raw) {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(raw);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  return hashHex;
+}
+
 /**
  * SMART UPLOAD RULES
  * Required semantic fields:
@@ -374,26 +384,48 @@ export default function Dashboard() {
   };
 
   useEffect(() => {
-    const token = localStorage.getItem("session_token");
-    if (!token) {
+    const localToken = localStorage.getItem("session_token");
+    if (!localToken) {
       window.location.href = "/login";
       return;
     }
 
     const checkSession = async () => {
-      const { data: session } = await supabase
-        .from("sessions")
-        .select("*, onboard_requests(*)")
-        .eq("session_token", token)
-        .single();
+      try {
+        const hashed = await hashToken(localToken);
 
-      if (!session) {
+        const { data: session } = await supabase
+          .from("user_sessions")
+          .select("*")
+          .eq("token_hash", hashed)
+          .single();
+
+        if (!session || new Date(session.expires_at) < new Date()) {
+          localStorage.removeItem("session_token");
+          window.location.href = "/login";
+          return;
+        }
+
+        // Fetch clinic using session.user_id
+        const { data: clinicRow, error: clinicError } = await supabase
+          .from("onboard_requests")
+          .select("*")
+          .eq("id", session.user_id)
+          .maybeSingle();
+
+        if (clinicError || !clinicRow) {
+          localStorage.removeItem("session_token");
+          window.location.href = "/login";
+          return;
+        }
+
+        setClinic(clinicRow);
+        setLoading(false);
+      } catch (err) {
+        console.error("checkSession error:", err);
+        localStorage.removeItem("session_token");
         window.location.href = "/login";
-        return;
       }
-
-      setClinic(session.onboard_requests);
-      setLoading(false);
     };
 
     checkSession();
@@ -415,9 +447,14 @@ export default function Dashboard() {
     fetchAppointments();
   }, [clinic]);
 
-  const logout = () => {
+  const logout = async () => {
+    const raw = localStorage.getItem("session_token");
+    if (raw) {
+      const tokenHash = await hashToken(raw);
+      await supabase.from("user_sessions").delete().eq("token_hash", tokenHash);
+    }
     localStorage.removeItem("session_token");
-    window.location.href = "/login";
+    window.location.href = "/";
   };
 
   // Parse a CSV file into canonical rows

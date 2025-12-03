@@ -4,6 +4,16 @@ import { supabase } from "./lib/supabaseClient";
 import { v4 as uuidv4 } from "uuid";
 import './index.css';
 
+// Hash token using Web Crypto API (browser-compatible)
+async function hashToken(raw) {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(raw);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  return hashHex;
+}
+
 export default function Login() {
   const [email, setEmail] = useState("");
   const [loading, setLoading] = useState(false);
@@ -31,13 +41,17 @@ export default function Login() {
       return;
     }
 
-    // 2. Generate session token
-    const token = uuidv4() + uuidv4(); // long, unique
+    // 2. Generate raw token
+    const rawToken = uuidv4() + uuidv4();
 
-    // 3. Insert session into database
-    const { error: sessionError } = await supabase.from("sessions").insert({
+    // 3. Hash the token
+    const tokenHash = await hashToken(rawToken);
+
+    // 4. Insert hashed token into DB
+    const { error: sessionError } = await supabase.from("user_sessions").insert({
       user_id: user.id,
-      session_token: token,
+      token_hash: tokenHash,
+      expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) // 7 days
     });
 
     if (sessionError) {
@@ -48,8 +62,8 @@ export default function Login() {
       return;
     }
 
-    // 4. Store token locally
-    localStorage.setItem("session_token", token);
+    // 5. Store ONLY the raw token locally
+    localStorage.setItem("session_token", rawToken);
 
     // 5. Redirect to dashboard
     window.location.href = "/dashboard";
