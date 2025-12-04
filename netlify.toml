@@ -4,9 +4,12 @@
 
 [functions]
   directory = "netlify/functions"
+  node_bundler = "esbuild"
+  external_node_modules = ["nodemailer"]
 
 [build.environment]
   SECRETS_SCAN_ENABLED = "false"
+  NODE_VERSION = "18"
 
 [[redirects]]
   from = "/*"

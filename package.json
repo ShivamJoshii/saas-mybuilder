@@ -8,6 +8,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.84.0",
     "bcryptjs": "^2.4.3",
+    "nodemailer": "^7.0.11",
     "papaparse": "^5.5.3",
     "react-router-dom": "^7.9.6",
     "uuid": "^13.0.0",
