@@ -37,3 +37,6 @@ lerna-debug.log*
 # Vite
 .vite
 
+
+# Local Netlify folder
+.netlify
