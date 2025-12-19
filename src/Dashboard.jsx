@@ -6,6 +6,17 @@ import AppointmentDetailsModal from "./components/AppointmentDetailsModal";
 import MergeModal from "./components/MergeModal";
 import "./index.css";
 
+const STATUS_OPTIONS = [
+  { value: 'pending', label: 'Pending (Not Called Yet)' },
+  { value: 'confirmed', label: 'Confirmed' },
+  { value: 'declined', label: 'Declined' },
+  { value: 'reschedule_requested', label: 'Reschedule Requested' },
+  { value: 'voicemail', label: 'Voicemail' },
+  { value: 'wrong_number', label: 'Wrong Number' },
+  { value: 'no_response', label: 'No Response' },
+  { value: 'conversation_incomplete', label: 'Conversation Incomplete' },
+];
+
 // Hash token using Web Crypto API (browser-compatible)
 async function hashToken(raw) {
   const encoder = new TextEncoder();
@@ -351,6 +362,11 @@ const keyCandidates = (row) => {
 };
 
 export default function Dashboard() {
+  const [viewMode, setViewMode] = useState("production"); // default
+  const [toast, setToast] = useState(null);
+  const [runningCalls, setRunningCalls] = useState(false);
+  const [editingRowId, setEditingRowId] = useState(null);
+  const [editDraft, setEditDraft] = useState({});
   const [loading, setLoading] = useState(true);
   const [clinic, setClinic] = useState(null);
   const [appointments, setAppointments] = useState([]);
@@ -440,7 +456,7 @@ export default function Dashboard() {
         .from("appointments")
         .select("*")
         .eq("clinic_id", clinic.id)
-        .order("created_at", { ascending: false });
+        .order("created_at", { ascending: true });
 
       setAppointments(data || []);
     };
@@ -456,6 +472,105 @@ export default function Dashboard() {
     }
     localStorage.removeItem("session_token");
     window.location.href = "/";
+  };
+
+  const refreshAppointments = async () => {
+    if (!clinic) return;
+    const { data } = await supabase
+      .from("appointments")
+      .select("*")
+      .eq("clinic_id", clinic.id)
+      .order("created_at", { ascending: true });
+    setAppointments(data || []);
+  };
+
+  const updateAppointment = async (id, updates) => {
+    if (viewMode !== "edit") return;
+
+    const { error } = await supabase
+      .from("appointments")
+      .update(updates)
+      .eq("id", id)
+      .eq("clinic_id", clinic.id);
+
+    if (error) {
+      showToast(error.message, "error");
+      return;
+    }
+
+    setAppointments(prev =>
+      prev.map(a => (a.id === id ? { ...a, ...updates } : a))
+    );
+  };
+
+  const formatPhone = (value) =>
+    value.replace(/\D/g, "").slice(0, 10);
+
+  const toDatetimeLocal = (ts) => {
+    if (!ts) return "";
+    return new Date(ts).toISOString().slice(0, 16);
+  };
+
+  const startEdit = (row) => {
+    if (viewMode !== "edit") {
+      showToast("Switch to Edit mode to make changes.", "info");
+      return;
+    }
+    setEditingRowId(row.id);
+    setEditDraft({
+      patient_name: row.patient_name,
+      phone: row.phone,
+      appointment_time: row.appointment_time,
+      doctor_name: row.doctor_name,
+    });
+  };
+
+  const cancelEdit = () => {
+    setEditingRowId(null);
+    setEditDraft({});
+  };
+
+  const saveEdit = async (id) => {
+    if (viewMode !== "edit") {
+      showToast("Switch to Edit mode to make changes.", "info");
+      return;
+    }
+    // basic constraints
+    if (!editDraft.patient_name || !editDraft.phone) {
+      showToast("Patient name and phone are required.", "error");
+      return;
+    }
+
+    const { error } = await supabase
+      .from("appointments")
+      .update(editDraft)
+      .eq("id", id)
+      .eq("clinic_id", clinic.id);
+
+    if (error) {
+      showToast(error.message, "error");
+      return;
+    }
+
+    setEditingRowId(null);
+    setEditDraft({});
+    refreshAppointments();
+  };
+
+  const deleteRow = async (id) => {
+    if (viewMode !== "edit") {
+      showToast("Switch to Edit mode to make changes.", "info");
+      return;
+    }
+    if (!confirm("Delete this appointment?")) return;
+
+    await supabase
+      .from("appointments")
+      .delete()
+      .eq("id", id)
+      .eq("clinic_id", clinic.id);
+
+    refreshAppointments();
   };
 
   // Parse a CSV file into canonical rows
@@ -609,6 +724,10 @@ export default function Dashboard() {
 
   // SMART MULTI FILE UPLOAD HANDLER (supports CSV + XLSX)
   const handleUploadSmart = async (e) => {
+    if (viewMode === "production") {
+      showToast("Production mode is read-only.", "info");
+      return;
+    }
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
 
@@ -679,11 +798,15 @@ export default function Dashboard() {
       e.target.value = ""; // allow re-upload of same file
     } catch (err) {
       console.error("Upload error:", err);
-      alert("Error processing file. Make sure it's a valid CSV or Excel file.");
+      showToast("Error processing file. Make sure it's a valid CSV or Excel file.", "error");
     }
   };
 
   const resetUploads = () => {
+    if (viewMode === "production") {
+      showToast("Production mode is read-only.", "info");
+      return;
+    }
     setParsedFiles([]);
     setMergedRows([]);
     setMissingFields(REQUIRED_FIELDS);
@@ -780,11 +903,11 @@ export default function Dashboard() {
 
     if (error) {
       console.log("SUPABASE INSERT ERROR:", error);
-      alert("Insert failed. Check console.");
+      showToast("Insert failed. Check console.", "error");
       return;
     }
 
-    alert("Imported successfully!");
+    showToast("Imported successfully!", "success");
     setShowMergeModal(false);
     setPendingMergedRows(null);
 
@@ -799,6 +922,10 @@ export default function Dashboard() {
   };
 
   const saveFixedRow = (updatedRow) => {
+    if (viewMode === "production") {
+      showToast("Production mode is read-only.", "info");
+      return;
+    }
     if (editingIndex === null) return;
 
     const newMerged = [...mergedRows];
@@ -847,45 +974,66 @@ export default function Dashboard() {
     setEditingIndex(null);
   };
 
+  const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+
+  const showToast = (message, type = "info") => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 3000);
+  };
+
   const runPendingCalls = async () => {
+    if (viewMode !== "production") return;
+    if (runningCalls) return;
+
+    if (!confirm("Start calling all pending patients now?")) return;
+
+    setRunningCalls(true);
+
+    try {
     const { data: pending, error } = await supabase
       .from("appointments")
-      .select("*")
+        .select("id")
       .eq("clinic_id", clinic.id)
       .eq("status", "pending");
 
+      if (error) throw error;
+
     if (!pending?.length) {
-      alert("No pending appointments.");
+        showToast("No pending appointments", "info");
       return;
     }
 
-    let success = 0;
-    let failed = 0;
-
-    for (const appt of pending) {
-      try {
-        const response = await fetch("/.netlify/functions/manual-call", {
+      for (let i = 0; i < pending.length; i++) {
+        await fetch("/.netlify/functions/manual-call", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ appointmentId: appt.id }),
+          body: JSON.stringify({ appointmentId: pending[i].id }),
         });
 
-        if (!response.ok) failed++;
-        else success++;
-      } catch (e) {
-        failed++;
+        // 🔥 BUFFER BETWEEN CALLS (2–4 sec ideal)
+        await sleep(3000);
       }
-    }
 
-    alert(`Calls started: ${success}, Failed triggers: ${failed}`);
+      showToast(`Started ${pending.length} calls`, "success");
+
+    } catch (err) {
+      console.error(err);
+      showToast("Failed to start calls", "error");
+    } finally {
+      setRunningCalls(false);
+    }
   };
 
   const confirmAndSave = async () => {
+    if (viewMode === "production") {
+      showToast("Production mode is read-only.", "info");
+      return;
+    }
     if (!mergedRows.length) return;
 
     // Must have at least 1 complete row
     if (completeRows.length === 0) {
-      alert("All rows are missing required fields. Fix them before saving.");
+      showToast("All rows are missing required fields. Fix them before saving.", "error");
       return;
     }
 
@@ -899,7 +1047,7 @@ export default function Dashboard() {
     }
 
     if (mergeError) {
-      alert("Fix merge error before saving.");
+      showToast("Fix merge error before saving.", "error");
       return;
     }
 
@@ -952,9 +1100,9 @@ export default function Dashboard() {
 
       if (error) {
         console.log("SUPABASE INSERT ERROR:", error);
-        alert("Insert failed. Check console.");
+        showToast("Insert failed. Check console.", "error");
       } else {
-        alert("Appointments uploaded!");
+        showToast("Appointments uploaded!", "success");
 
         // Reset state
         resetUploads();
@@ -1036,6 +1184,35 @@ export default function Dashboard() {
             <b>Integration:</b> {clinic.integration_type}
           </p>
         </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+          <button
+            className="button"
+            style={{
+              background: viewMode === "edit" ? "var(--primary)" : "var(--destructive)",
+              marginRight: 12
+            }}
+            onClick={() => {
+              if (editingRowId) {
+                showToast("Finish editing before switching modes.", "info");
+                return;
+              }
+              if (viewMode === "edit") {
+                // validation gate
+                const invalid = appointments.some(
+                  a =>
+                    a.status === "pending" &&
+                    (!a.patient_name || !a.phone || !a.appointment_day)
+                );
+                if (invalid) {
+                  showToast("Fix incomplete appointments before switching to Production.", "error");
+                  return;
+                }
+              }
+              setViewMode(v => (v === "edit" ? "production" : "edit"));
+            }}
+          >
+            {viewMode === "edit" ? "Switch to Production" : "Switch to Edit"}
+          </button>
         <button
           onClick={logout}
           className="button"
@@ -1046,6 +1223,7 @@ export default function Dashboard() {
         >
           Logout
         </button>
+        </div>
       </div>
 
       <hr
@@ -1058,6 +1236,8 @@ export default function Dashboard() {
 
       {/* MANUAL MODE */}
       {clinic.integration_type === "manual" && (
+        <>
+          {viewMode === "edit" && (
         <>
           <h2
             style={{
@@ -1400,6 +1580,8 @@ export default function Dashboard() {
               </div>
             )}
           </div>
+            </>
+          )}
 
           {/* Recent appointments table (unchanged) */}
           <h3
@@ -1416,10 +1598,11 @@ export default function Dashboard() {
 
           <button
             className="button"
+            disabled={runningCalls}
             onClick={runPendingCalls}
             style={{ marginTop: 20 }}
           >
-            Run Pending Calls
+            {runningCalls ? "Running Calls…" : "Run Pending Calls"}
           </button>
 
           <div
@@ -1493,6 +1676,16 @@ export default function Dashboard() {
                       color: "var(--foreground)",
                     }}
                   >
+                    Call Summary
+                  </th>
+                  <th
+                    style={{
+                      padding: "0.75rem",
+                      textAlign: "left",
+                      fontWeight: "600",
+                      color: "var(--foreground)",
+                    }}
+                  >
                     Status
                   </th>
                   <th
@@ -1511,7 +1704,7 @@ export default function Dashboard() {
                 {appointments.length === 0 ? (
                   <tr>
                     <td
-                      colSpan="6"
+                      colSpan="7"
                       style={{
                         padding: "1.5rem",
                         textAlign: "center",
@@ -1537,19 +1730,164 @@ export default function Dashboard() {
                       }
                     >
                       <td style={{ padding: "0.75rem" }}>
-                        {a.patient_name || "N/A"}
+                        {viewMode === "edit" ? (
+                          <input
+                            defaultValue={a.patient_name || ""}
+                            placeholder="Patient name"
+                            onBlur={async (e) => {
+                              const name = e.target.value.trim();
+
+                              // ⛔ Block empty names
+                              if (!name) {
+                                showToast("Patient name cannot be empty", "error");
+                                e.target.value = a.patient_name || "";
+                                return;
+                              }
+
+                              await updateAppointment(a.id, { patient_name: name });
+                            }}
+                            style={{
+                              width: 160,
+                              padding: "0.4rem",
+                              borderRadius: 6,
+                              border: "1px solid var(--border)",
+                              background: "var(--input)",
+                              color: "var(--foreground)",
+                              fontSize: "0.85rem",
+                            }}
+                          />
+                        ) : (
+                          <span>{a.patient_name || "N/A"}</span>
+                        )}
                       </td>
-                      <td style={{ padding: "0.75rem" }}>{a.phone || "N/A"}</td>
                       <td style={{ padding: "0.75rem" }}>
-                        {a.appointment_time || "N/A"}
+                        {viewMode === "edit" ? (
+                          <input
+                            defaultValue={a.phone || ""}
+                            placeholder="10-digit phone"
+                            onChange={(e) => {
+                              // local-only formatting, no DB call
+                              e.target.value = e.target.value.replace(/\D/g, "").slice(0, 10);
+                            }}
+                            onBlur={async (e) => {
+                              const digits = e.target.value.replace(/\D/g, "");
+
+                              // ⛔ Don't save invalid phone
+                              if (digits.length !== 10) {
+                                showToast("Phone must be exactly 10 digits", "error");
+                                e.target.value = a.phone || "";
+                                return;
+                              }
+
+                              await updateAppointment(a.id, { phone: digits });
+                            }}
+                            style={{
+                              width: 120,
+                              padding: "0.4rem",
+                              borderRadius: 6,
+                              border: "1px solid var(--border)",
+                              background: "var(--input)",
+                              color: "var(--foreground)",
+                              fontSize: "0.85rem",
+                            }}
+                          />
+                        ) : (
+                          <span>{a.phone || "N/A"}</span>
+                        )}
+                      </td>
+                      <td style={{ padding: "0.75rem" }}>
+                        {viewMode === "edit" ? (
+                          <input
+                            type="datetime-local"
+                            value={toDatetimeLocal(a.appointment_time)}
+                            onChange={(e) =>
+                              updateAppointment(a.id, {
+                                appointment_time: new Date(e.target.value).toISOString(),
+                              })
+                            }
+                            style={{
+                              padding: "0.4rem",
+                              borderRadius: 6,
+                              border: "1px solid var(--border)",
+                              background: "var(--input)",
+                              color: "var(--foreground)",
+                              fontSize: "0.85rem",
+                            }}
+                          />
+                        ) : (
+                          <span>
+                            {a.appointment_time
+                              ? new Date(a.appointment_time).toLocaleString()
+                              : "N/A"}
+                          </span>
+                        )}
                       </td>
                       <td style={{ padding: "0.75rem" }}>
                         {a.doctor_name || "N/A"}
                       </td>
-                      <td style={{ padding: "0.75rem" }}>
-                        {a.status || "pending"}
+                      <td style={{ padding: "0.75rem", maxWidth: 260 }}>
+                        {a.summary ? (
+                          <span
+                            style={{
+                              display: "inline-block",
+                              whiteSpace: "nowrap",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              maxWidth: 240,
+                              verticalAlign: "bottom",
+                            }}
+                            title={a.summary} // hover shows full text
+                          >
+                            {a.summary}
+                          </span>
+                        ) : (
+                          <span style={{ color: "var(--muted-foreground)" }}>
+                            —
+                          </span>
+                        )}
                       </td>
                       <td style={{ padding: "0.75rem" }}>
+                        {viewMode === "edit" ? (
+                          <select
+                            value={a.status || "pending"}
+                            onChange={(e) =>
+                              updateAppointment(a.id, { status: e.target.value })
+                            }
+                            style={{
+                              padding: "0.4rem",
+                              borderRadius: 6,
+                              border: "1px solid var(--border)",
+                              background: "var(--input)",
+                              color: "var(--foreground)",
+                              fontSize: "0.85rem",
+                            }}
+                          >
+                            {STATUS_OPTIONS.map(opt => (
+                              <option key={opt.value} value={opt.value}>
+                                {opt.label}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <span>
+                            {STATUS_OPTIONS.find(s => s.value === a.status)?.label || "Pending"}
+                          </span>
+                        )}
+                      </td>
+                      <td style={{ padding: "0.75rem" }}>
+                        {viewMode === "edit" ? (
+                          editingRowId === a.id ? (
+                            <>
+                              <button onClick={() => saveEdit(a.id)}>Save</button>
+                              <button onClick={() => cancelEdit()}>Cancel</button>
+                            </>
+                          ) : (
+                            <>
+                              <button onClick={() => startEdit(a)}>Edit</button>
+                              <button onClick={() => deleteRow(a.id)}>Delete</button>
+                            </>
+                          )
+                        ) : (
                         <button
                           onClick={() => setSelectedAppointment(a)}
                           style={{
@@ -1560,11 +1898,11 @@ export default function Dashboard() {
                             cursor: "pointer",
                             fontSize: "0.875rem",
                             padding: 0,
-                            fontFamily: "var(--font-sans)",
                           }}
                         >
-                          View Details
+                            View Call Summary
                         </button>
+                        )}
                       </td>
                     </tr>
                   ))
@@ -1681,6 +2019,31 @@ export default function Dashboard() {
           >
             Setup in progress
           </button>
+        </div>
+      )}
+
+      {/* Toast Notification */}
+      {toast && (
+        <div
+          style={{
+            position: "fixed",
+            bottom: 24,
+            right: 24,
+            padding: "12px 16px",
+            borderRadius: 8,
+            background:
+              toast.type === "success"
+                ? "#16a34a"
+                : toast.type === "error"
+                ? "#dc2626"
+                : "#334155",
+            color: "white",
+            fontSize: "0.9rem",
+            boxShadow: "0 10px 30px rgba(0,0,0,0.25)",
+            zIndex: 9999
+          }}
+        >
+          {toast.message}
         </div>
       )}
     </div>
