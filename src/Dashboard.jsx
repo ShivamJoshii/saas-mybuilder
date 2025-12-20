@@ -4,6 +4,7 @@ import * as XLSX from "xlsx";
 import { supabase } from "./lib/supabaseClient";
 import AppointmentDetailsModal from "./components/AppointmentDetailsModal";
 import MergeModal from "./components/MergeModal";
+import AddPatientForm from "./components/AddPatientForm";
 import "./index.css";
 
 const STATUS_OPTIONS = [
@@ -368,6 +369,9 @@ export default function Dashboard() {
   const [editingRowId, setEditingRowId] = useState(null);
   const [editDraft, setEditDraft] = useState({});
   const [loading, setLoading] = useState(true);
+  const [appointmentsLoading, setAppointmentsLoading] = useState(false);
+  const [lastRefreshed, setLastRefreshed] = useState(null);
+  const [showAddModal, setShowAddModal] = useState(false);
   const [clinic, setClinic] = useState(null);
   const [appointments, setAppointments] = useState([]);
   const [selectedAppointment, setSelectedAppointment] = useState(null);
@@ -448,19 +452,28 @@ export default function Dashboard() {
     checkSession();
   }, []);
 
+  const fetchAppointments = async () => {
+    if (!clinic) return;
+    setAppointmentsLoading(true);
+
+    const { data, error } = await supabase
+      .from("appointments")
+      .select("*")
+      .eq("clinic_id", clinic.id)
+      .order("appointment_time", { ascending: true });
+
+    if (error) {
+      console.error("Failed to fetch appointments:", error);
+    } else {
+      setAppointments(data || []);
+    }
+
+    setLastRefreshed(new Date());
+    setAppointmentsLoading(false);
+  };
+
   useEffect(() => {
     if (!clinic) return;
-
-    const fetchAppointments = async () => {
-      const { data } = await supabase
-        .from("appointments")
-        .select("*")
-        .eq("clinic_id", clinic.id)
-        .order("created_at", { ascending: true });
-
-      setAppointments(data || []);
-    };
-
     fetchAppointments();
   }, [clinic]);
 
@@ -474,15 +487,6 @@ export default function Dashboard() {
     window.location.href = "/";
   };
 
-  const refreshAppointments = async () => {
-    if (!clinic) return;
-    const { data } = await supabase
-      .from("appointments")
-      .select("*")
-      .eq("clinic_id", clinic.id)
-      .order("created_at", { ascending: true });
-    setAppointments(data || []);
-  };
 
   const updateAppointment = async (id, updates) => {
     if (viewMode !== "edit") return;
@@ -498,9 +502,7 @@ export default function Dashboard() {
       return;
     }
 
-    setAppointments(prev =>
-      prev.map(a => (a.id === id ? { ...a, ...updates } : a))
-    );
+    await fetchAppointments();
   };
 
   const formatPhone = (value) =>
@@ -508,7 +510,8 @@ export default function Dashboard() {
 
   const toDatetimeLocal = (ts) => {
     if (!ts) return "";
-    return new Date(ts).toISOString().slice(0, 16);
+    // Use stored string, DO NOT convert timezone
+    return ts.replace(" ", "T").slice(0, 16);
   };
 
   const startEdit = (row) => {
@@ -554,7 +557,7 @@ export default function Dashboard() {
 
     setEditingRowId(null);
     setEditDraft({});
-    refreshAppointments();
+    await fetchAppointments();
   };
 
   const deleteRow = async (id) => {
@@ -570,7 +573,7 @@ export default function Dashboard() {
       .eq("id", id)
       .eq("clinic_id", clinic.id);
 
-    refreshAppointments();
+    await fetchAppointments();
   };
 
   // Parse a CSV file into canonical rows
@@ -912,13 +915,7 @@ export default function Dashboard() {
     setPendingMergedRows(null);
 
     // Refresh list
-    const { data } = await supabase
-      .from("appointments")
-      .select("*")
-      .eq("clinic_id", clinic.id)
-      .order("created_at", { ascending: false });
-
-    setAppointments(data);
+    await fetchAppointments();
   };
 
   const saveFixedRow = (updatedRow) => {
@@ -1015,6 +1012,7 @@ export default function Dashboard() {
       }
 
       showToast(`Started ${pending.length} calls`, "success");
+      await fetchAppointments();
 
     } catch (err) {
       console.error(err);
@@ -1107,13 +1105,7 @@ export default function Dashboard() {
         // Reset state
         resetUploads();
 
-        const { data } = await supabase
-          .from("appointments")
-          .select("*")
-          .eq("clinic_id", clinic.id)
-          .order("created_at", { ascending: false });
-
-        setAppointments(data || []);
+        await fetchAppointments();
       }
     } finally {
       setSaving(false);
@@ -1596,14 +1588,49 @@ export default function Dashboard() {
             Recent Appointments
           </h3>
 
-          <button
-            className="button"
-            disabled={runningCalls}
-            onClick={runPendingCalls}
-            style={{ marginTop: 20 }}
-          >
-            {runningCalls ? "Running Calls…" : "Run Pending Calls"}
-          </button>
+          <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", marginTop: 20, marginBottom: 12 }}>
+            <button
+              className="button"
+              onClick={fetchAppointments}
+              disabled={appointmentsLoading}
+              style={{
+                padding: "0.5rem 1rem",
+                borderRadius: 6,
+                border: "1px solid var(--border)",
+                background: "var(--background)",
+                color: "var(--foreground)",
+                fontSize: "0.875rem",
+                cursor: appointmentsLoading ? "not-allowed" : "pointer",
+                opacity: appointmentsLoading ? 0.5 : 1,
+              }}
+            >
+              {appointmentsLoading ? "Refreshing..." : "Refresh"}
+            </button>
+            {viewMode === "edit" && (
+              <button
+                onClick={() => setShowAddModal(true)}
+                className="button"
+                style={{
+                  background: "var(--primary)",
+                  color: "var(--primary-foreground)",
+                }}
+              >
+                + Add Patient
+              </button>
+            )}
+            <button
+              className="button"
+              disabled={runningCalls}
+              onClick={runPendingCalls}
+            >
+              {runningCalls ? "Running Calls…" : "Run Pending Calls"}
+            </button>
+            {lastRefreshed && (
+              <p style={{ fontSize: "0.75rem", color: "var(--muted-foreground)", margin: 0 }}>
+                Last refreshed: {lastRefreshed.toLocaleTimeString()}
+              </p>
+            )}
+          </div>
 
           <div
             style={{
@@ -1802,7 +1829,7 @@ export default function Dashboard() {
                             value={toDatetimeLocal(a.appointment_time)}
                             onChange={(e) =>
                               updateAppointment(a.id, {
-                                appointment_time: new Date(e.target.value).toISOString(),
+                                appointment_time: e.target.value.replace("T", " "),
                               })
                             }
                             style={{
@@ -1817,7 +1844,7 @@ export default function Dashboard() {
                         ) : (
                           <span>
                             {a.appointment_time
-                              ? new Date(a.appointment_time).toLocaleString()
+                              ? a.appointment_time.replace("T", " ")
                               : "N/A"}
                           </span>
                         )}
@@ -1945,24 +1972,44 @@ export default function Dashboard() {
           >
             <h3 style={{ marginBottom: 10 }}>Fix Missing Fields</h3>
 
-            {rowToFix.missing.map((field) => (
-              <div key={field} style={{ marginBottom: 12 }}>
-                <label>{field}</label>
-                <input
-                  type="text"
-                  style={{
-                    width: "100%",
-                    padding: 8,
-                    marginTop: 4,
-                    border: "1px solid #ccc"
-                  }}
-                  value={rowToFix[field] || ""}
-                  onChange={(e) =>
-                    setRowToFix({ ...rowToFix, [field]: e.target.value })
-                  }
-                />
-              </div>
-            ))}
+            {[
+              "patient_name",
+              "phone",
+              "appointment_reason",
+              "appointment_day",
+              "appointment_time", // ✅ always editable
+            ].map((field) => {
+              const isMissing = rowToFix.missing.includes(field);
+
+              return (
+                <div key={field} style={{ marginBottom: 12 }}>
+                  <label style={{ fontWeight: 500 }}>
+                    {field}
+                    {isMissing && (
+                      <span style={{ color: "red", marginLeft: 6 }}>*</span>
+                    )}
+                  </label>
+
+                  <input
+                    type={field === "appointment_day" ? "date" : "text"}
+                    placeholder={
+                      field === "appointment_time" ? "e.g. 02:30 PM" : ""
+                    }
+                    style={{
+                      width: "100%",
+                      padding: 8,
+                      marginTop: 4,
+                      border: "1px solid #ccc",
+                      borderRadius: 6,
+                    }}
+                    value={rowToFix[field] || ""}
+                    onChange={(e) =>
+                      setRowToFix({ ...rowToFix, [field]: e.target.value })
+                    }
+                  />
+                </div>
+              );
+            })}
 
             <button
               className="button"
@@ -2019,6 +2066,52 @@ export default function Dashboard() {
           >
             Setup in progress
           </button>
+        </div>
+      )}
+
+      {/* Add Patient Modal */}
+      {showAddModal && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: "rgba(0,0,0,0.4)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000,
+          }}
+        >
+          <div
+            style={{
+              width: 420,
+              borderRadius: 8,
+              background: "white",
+              padding: "1rem",
+            }}
+          >
+            <h3
+              style={{
+                marginBottom: "0.75rem",
+                fontSize: "1.125rem",
+                fontWeight: 600,
+              }}
+            >
+              Add Patient
+            </h3>
+
+            <AddPatientForm
+              clinicId={clinic.id}
+              onClose={() => setShowAddModal(false)}
+              onSaved={async () => {
+                setShowAddModal(false);
+                await fetchAppointments(); // refresh table
+              }}
+            />
+          </div>
         </div>
       )}
 
