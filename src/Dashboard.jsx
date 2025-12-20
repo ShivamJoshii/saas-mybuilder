@@ -576,6 +576,31 @@ export default function Dashboard() {
     await fetchAppointments();
   };
 
+  const deleteAllAppointments = async () => {
+    if (viewMode !== "edit") {
+      showToast("Switch to Edit mode first", "info");
+      return;
+    }
+
+    const ok = confirm(
+      "⚠️ This will permanently delete ALL patients for this clinic.\n\nAre you sure?"
+    );
+    if (!ok) return;
+
+    const { error } = await supabase
+      .from("appointments")
+      .delete()
+      .eq("clinic_id", clinic.id);
+
+    if (error) {
+      showToast("Failed to delete appointments", "error");
+      return;
+    }
+
+    showToast("All patients deleted", "success");
+    setAppointments([]);
+  };
+
   // Parse a CSV file into canonical rows
   const parseCsvFile = (file) =>
     new Promise((resolve, reject) => {
@@ -969,6 +994,48 @@ export default function Dashboard() {
     // Close modal
     setRowToFix(null);
     setEditingIndex(null);
+  };
+
+  const removeMergedRow = (rowId) => {
+    if (viewMode === "production") {
+      showToast("Production mode is read-only.", "info");
+      return;
+    }
+
+    const filtered = mergedRows.filter(r => r.id !== rowId);
+
+    setMergedRows(filtered);
+
+    // Recompute complete / incomplete
+    const newComplete = [];
+    const newIncomplete = [];
+    const overallMissing = new Set();
+
+    filtered.forEach((row) => {
+      const missing = REQUIRED_FIELDS.filter(
+        (f) => !row[f] || String(row[f]).trim() === ""
+      );
+
+      if (missing.length === 0) {
+        newComplete.push(row);
+      } else {
+        newIncomplete.push({ ...row, missing, _id: row.id });
+        missing.forEach(m => overallMissing.add(m));
+      }
+    });
+
+    setCompleteRows(newComplete);
+    setIncompleteRows(newIncomplete);
+    setMissingFields(Array.from(overallMissing));
+
+    // Update upload step
+    if (overallMissing.size === 0) {
+      setUploadStep(3);
+    } else {
+      setUploadStep(2);
+    }
+
+    showToast("Row removed", "success");
   };
 
   const sleep = (ms) => new Promise(res => setTimeout(res, ms));
@@ -1487,7 +1554,7 @@ export default function Dashboard() {
                         <td style={{ padding: "8px", color: "red" }}>
                           {r.missing.join(", ")}
                         </td>
-                        <td style={{ padding: "8px" }}>
+                        <td style={{ padding: "8px", display: "flex", gap: 8 }}>
                           <button
                             className="button"
                             onClick={() => {
@@ -1497,6 +1564,17 @@ export default function Dashboard() {
                             }}
                           >
                             Fix
+                          </button>
+
+                          <button
+                            className="button"
+                            style={{
+                              background: "var(--destructive)",
+                              color: "white",
+                            }}
+                            onClick={() => removeMergedRow(r._id)}
+                          >
+                            Remove
                           </button>
                         </td>
                       </tr>
@@ -1625,6 +1703,19 @@ export default function Dashboard() {
             >
               {runningCalls ? "Running Calls…" : "Run Pending Calls"}
             </button>
+            {viewMode === "edit" && (
+              <button
+                onClick={deleteAllAppointments}
+                className="button"
+                style={{
+                  marginLeft: 12,
+                  background: "var(--destructive)",
+                  color: "white",
+                }}
+              >
+                Delete All Patients
+              </button>
+            )}
             {lastRefreshed && (
               <p style={{ fontSize: "0.75rem", color: "var(--muted-foreground)", margin: 0 }}>
                 Last refreshed: {lastRefreshed.toLocaleTimeString()}
@@ -1903,32 +1994,33 @@ export default function Dashboard() {
                       </td>
                       <td style={{ padding: "0.75rem" }}>
                         {viewMode === "edit" ? (
-                          editingRowId === a.id ? (
-                            <>
-                              <button onClick={() => saveEdit(a.id)}>Save</button>
-                              <button onClick={() => cancelEdit()}>Cancel</button>
-                            </>
-                          ) : (
-                            <>
-                              <button onClick={() => startEdit(a)}>Edit</button>
-                              <button onClick={() => deleteRow(a.id)}>Delete</button>
-                            </>
-                          )
+                          <button
+                            onClick={() => deleteRow(a.id)}
+                            style={{
+                              background: "transparent",
+                              border: "1px solid var(--border)",
+                              padding: "4px 8px",
+                              borderRadius: 6,
+                              cursor: "pointer",
+                            }}
+                          >
+                            Delete
+                          </button>
                         ) : (
-                        <button
-                          onClick={() => setSelectedAppointment(a)}
-                          style={{
-                            background: "none",
-                            border: "none",
-                            color: "var(--primary)",
-                            textDecoration: "underline",
-                            cursor: "pointer",
-                            fontSize: "0.875rem",
-                            padding: 0,
-                          }}
-                        >
+                          <button
+                            onClick={() => setSelectedAppointment(a)}
+                            style={{
+                              background: "none",
+                              border: "none",
+                              color: "var(--primary)",
+                              textDecoration: "underline",
+                              cursor: "pointer",
+                              fontSize: "0.875rem",
+                              padding: 0,
+                            }}
+                          >
                             View Call Summary
-                        </button>
+                          </button>
                         )}
                       </td>
                     </tr>
