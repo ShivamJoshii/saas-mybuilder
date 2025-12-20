@@ -18,6 +18,17 @@ const STATUS_OPTIONS = [
   { value: 'conversation_incomplete', label: 'Conversation Incomplete' },
 ];
 
+const STATUS_COLORS = {
+  pending: "var(--muted)",          // neutral
+  confirmed: "#16a34a",                // green
+  reschedule_requested: "#f59e0b",          // orange
+  voicemail: "#9ca3af",                // dull grey
+  no_response: "#9ca3af",                // dull grey
+  conversation_incomplete: "#9ca3af",       // dull grey
+  wrong_number: "#6b7280",                // darker grey
+  declined: "#dc2626",                // red
+};
+
 // Hash token using Web Crypto API (browser-compatible)
 async function hashToken(raw) {
   const encoder = new TextEncoder();
@@ -1920,6 +1931,12 @@ export default function Dashboard() {
                           <input
                             defaultValue={a.patient_name || ""}
                             placeholder="Patient name"
+                            onKeyDown={async (e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                e.currentTarget.blur(); // 🔥 triggers onBlur
+                              }
+                            }}
                             onBlur={async (e) => {
                               const name = e.target.value.trim();
 
@@ -1952,8 +1969,13 @@ export default function Dashboard() {
                             defaultValue={a.phone || ""}
                             placeholder="10-digit phone"
                             onChange={(e) => {
-                              // local-only formatting, no DB call
                               e.target.value = e.target.value.replace(/\D/g, "").slice(0, 10);
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                e.currentTarget.blur(); // 🔥 save on Enter
+                              }
                             }}
                             onBlur={async (e) => {
                               const digits = e.target.value.replace(/\D/g, "");
@@ -2082,12 +2104,16 @@ export default function Dashboard() {
                               updateAppointment(a.id, { status: e.target.value })
                             }
                             style={{
-                              padding: "0.4rem",
+                              padding: "0.4rem 0.6rem",
                               borderRadius: 6,
                               border: "1px solid var(--border)",
-                              background: "var(--input)",
-                              color: "var(--foreground)",
+                              background: STATUS_COLORS[a.status || "pending"],
+                              color: ["confirmed", "declined", "reschedule_requested"].includes(a.status)
+                                ? "white"
+                                : "#111827",
                               fontSize: "0.85rem",
+                              fontWeight: 500,
+                              cursor: "pointer",
                             }}
                           >
                             {STATUS_OPTIONS.map(opt => (
@@ -2097,7 +2123,19 @@ export default function Dashboard() {
                             ))}
                           </select>
                         ) : (
-                          <span>
+                          <span
+                            style={{
+                              padding: "4px 8px",
+                              borderRadius: 999,
+                              background: STATUS_COLORS[a.status || "pending"],
+                              color: ["confirmed", "declined", "reschedule_requested"].includes(a.status)
+                                ? "white"
+                                : "#111827",
+                              fontSize: "0.75rem",
+                              fontWeight: 600,
+                              display: "inline-block",
+                            }}
+                          >
                             {STATUS_OPTIONS.find(s => s.value === a.status)?.label || "Pending"}
                           </span>
                         )}
@@ -2184,6 +2222,14 @@ export default function Dashboard() {
               "appointment_time", // ✅ always editable
             ].map((field) => {
               const isMissing = rowToFix.missing.includes(field);
+              const inputStyle = {
+                width: "100%",
+                padding: 8,
+                marginTop: 4,
+                border: "1px solid #ccc",
+                borderRadius: 6,
+                cursor: "pointer",
+              };
 
               return (
                 <div key={field} style={{ marginBottom: 12 }}>
@@ -2194,23 +2240,54 @@ export default function Dashboard() {
                     )}
                   </label>
 
-                  <input
-                    type={field === "appointment_day" ? "date" : "text"}
-                    placeholder={
-                      field === "appointment_time" ? "e.g. 02:30 PM" : ""
-                    }
-                    style={{
-                      width: "100%",
-                      padding: 8,
-                      marginTop: 4,
-                      border: "1px solid #ccc",
-                      borderRadius: 6,
-                    }}
-                    value={rowToFix[field] || ""}
-                    onChange={(e) =>
-                      setRowToFix({ ...rowToFix, [field]: e.target.value })
-                    }
-                  />
+                  {field === "appointment_day" && (
+                    <div
+                      onClick={(e) => {
+                        const input = e.currentTarget.querySelector("input");
+                        input?.showPicker?.();
+                        input?.focus();
+                      }}
+                    >
+                      <input
+                        type="date"
+                        value={rowToFix.appointment_day || ""}
+                        onChange={(e) =>
+                          setRowToFix({ ...rowToFix, appointment_day: e.target.value })
+                        }
+                        style={inputStyle}
+                      />
+                    </div>
+                  )}
+
+                  {field === "appointment_time" && (
+                    <div
+                      onClick={(e) => {
+                        const input = e.currentTarget.querySelector("input");
+                        input?.showPicker?.();
+                        input?.focus();
+                      }}
+                    >
+                      <input
+                        type="time"
+                        value={rowToFix.appointment_time || ""}
+                        onChange={(e) =>
+                          setRowToFix({ ...rowToFix, appointment_time: e.target.value })
+                        }
+                        style={inputStyle}
+                      />
+                    </div>
+                  )}
+
+                  {!["appointment_day", "appointment_time"].includes(field) && (
+                    <input
+                      type="text"
+                      value={rowToFix[field] || ""}
+                      onChange={(e) =>
+                        setRowToFix({ ...rowToFix, [field]: e.target.value })
+                      }
+                      style={inputStyle}
+                    />
+                  )}
                 </div>
               );
             })}

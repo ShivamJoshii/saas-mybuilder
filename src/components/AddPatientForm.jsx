@@ -82,30 +82,50 @@ export default function AddPatientForm({ clinicId, onClose, onSaved }) {
           fontSize: "0.875rem",
         }}
       />
-      <input
-        name="appointment_day"
-        type="date"
-        onChange={handleChange}
-        style={{
-          width: "100%",
-          padding: "0.5rem",
-          borderRadius: 6,
-          border: "1px solid var(--border)",
-          fontSize: "0.875rem",
+      <div
+        onClick={(e) => {
+          const input = e.currentTarget.querySelector("input");
+          input?.showPicker?.();
+          input?.focus();
         }}
-      />
-      <input
-        name="appointment_time"
-        type="time"
-        onChange={handleChange}
-        style={{
-          width: "100%",
-          padding: "0.5rem",
-          borderRadius: 6,
-          border: "1px solid var(--border)",
-          fontSize: "0.875rem",
+      >
+        <input
+          name="appointment_day"
+          type="date"
+          value={form.appointment_day}
+          onChange={handleChange}
+          style={{
+            width: "100%",
+            padding: "0.5rem",
+            borderRadius: 6,
+            border: "1px solid var(--border)",
+            fontSize: "0.875rem",
+            cursor: "pointer",
+          }}
+        />
+      </div>
+      <div
+        onClick={(e) => {
+          const input = e.currentTarget.querySelector("input");
+          input?.showPicker?.();
+          input?.focus();
         }}
-      />
+      >
+        <input
+          name="appointment_time"
+          type="time"
+          value={form.appointment_time}
+          onChange={handleChange}
+          style={{
+            width: "100%",
+            padding: "0.5rem",
+            borderRadius: 6,
+            border: "1px solid var(--border)",
+            fontSize: "0.875rem",
+            cursor: "pointer",
+          }}
+        />
+      </div>
       <input
         name="doctor_name"
         placeholder="Doctor (optional)"
