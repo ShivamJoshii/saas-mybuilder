@@ -373,7 +373,6 @@ export default function Dashboard() {
   const [lastRefreshed, setLastRefreshed] = useState(null);
   const [showAddModal, setShowAddModal] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [sortFrozenAt, setSortFrozenAt] = useState(null);
   const [clinic, setClinic] = useState(null);
   const [appointments, setAppointments] = useState([]);
   const [selectedAppointment, setSelectedAppointment] = useState(null);
@@ -467,27 +466,20 @@ export default function Dashboard() {
     checkSession();
   }, []);
 
-  const fetchAppointments = async ({ allowResort = false } = {}) => {
+  const fetchAppointments = async () => {
     if (!clinic) return;
     setAppointmentsLoading(true);
 
     const { data, error } = await supabase
       .from("appointments")
       .select("*")
-      .eq("clinic_id", clinic.id);
+      .eq("clinic_id", clinic.id)
+      .order("appointment_time", { ascending: true });
 
-    if (!error && data) {
-      let rows = data;
-
-      // ✅ only sort if allowed
-      if (allowResort || !sortFrozenAt) {
-        rows = [...data].sort((a, b) =>
-          (a.appointment_time || "").localeCompare(b.appointment_time || "")
-        );
-        setSortFrozenAt(Date.now());
-      }
-
-      setAppointments(rows);
+    if (error) {
+      console.error("Failed to fetch appointments:", error);
+    } else {
+      setAppointments(data || []);
     }
 
     setLastRefreshed(new Date());
@@ -498,21 +490,6 @@ export default function Dashboard() {
     if (!clinic) return;
     fetchAppointments();
   }, [clinic]);
-
-  useEffect(() => {
-    if (!sortFrozenAt) return;
-
-    const timer = setTimeout(() => {
-      setAppointments(prev =>
-        [...prev].sort((a, b) =>
-          (a.appointment_time || "").localeCompare(b.appointment_time || "")
-        )
-      );
-      setSortFrozenAt(Date.now());
-    }, 30000); // 30 seconds
-
-    return () => clearTimeout(timer);
-  }, [sortFrozenAt]);
 
   const logout = async () => {
     const raw = localStorage.getItem("session_token");
@@ -539,7 +516,7 @@ export default function Dashboard() {
       return;
     }
 
-    // ✅ update locally, no resort
+    // Update local state only (no re-fetch to prevent sorting jumps)
     setAppointments(prev =>
       prev.map(a => a.id === id ? { ...a, ...updates } : a)
     );
@@ -568,6 +545,12 @@ export default function Dashboard() {
 
   const getDatePart = (ts) => toDatetimeLocal(ts)?.slice(0, 10) || "";
   const getTimePart = (ts) => toDatetimeLocal(ts)?.slice(11, 16) || "";
+
+  const normalizeToDbTime = (v) => {
+    // v = YYYY-MM-DDTHH:mm
+    if (!v) return null;
+    return v.replace("T", " ");
+  };
 
   const startEdit = (row) => {
     if (viewMode !== "edit") {
@@ -1752,7 +1735,7 @@ export default function Dashboard() {
             )}
             <button
               className="button"
-              onClick={() => fetchAppointments({ allowResort: true })}
+              onClick={fetchAppointments}
               disabled={appointmentsLoading}
               style={{
                 padding: "0.5rem 1rem",
@@ -2002,30 +1985,49 @@ export default function Dashboard() {
                         {viewMode === "edit" ? (
                           <div
                             onClick={(e) => {
+                              e.preventDefault();
                               const input = e.currentTarget.querySelector("input");
-                              input?.showPicker?.(); // Chrome / modern browsers
-                              input?.focus();
+                              if (!input) return;
+                              input.focus();
+                              input.showPicker?.();
                             }}
-                            style={{
-                              cursor: "pointer",
-                            }}
+                            style={{ cursor: "pointer", minWidth: 180 }}
                           >
                             <input
                               type="datetime-local"
-                              value={toDatetimeLocal(a.appointment_time)}
-                              onChange={() => {}}
-                              onBlur={(e) => {
+                              value={
+                                editDraft[a.id]?.appointment_time ??
+                                toDatetimeLocal(a.appointment_time)
+                              }
+                              onChange={(e) => {
                                 const v = e.target.value;
+                                setEditDraft(prev => ({
+                                  ...prev,
+                                  [a.id]: {
+                                    ...(prev[a.id] || {}),
+                                    appointment_time: v,
+                                  }
+                                }));
+                              }}
+                              onBlur={async () => {
+                                const v = editDraft[a.id]?.appointment_time;
                                 if (!v) return;
 
-                                const formatted = v.replace("T", " ");
-                                if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(formatted)) {
+                                // strict validation
+                                if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(v)) {
                                   showToast("Invalid date/time", "error");
                                   return;
                                 }
 
-                                updateAppointment(a.id, {
-                                  appointment_time: formatted,
+                                await updateAppointment(a.id, {
+                                  appointment_time: normalizeToDbTime(v),
+                                });
+
+                                // cleanup draft
+                                setEditDraft(prev => {
+                                  const copy = { ...prev };
+                                  delete copy[a.id];
+                                  return copy;
                                 });
                               }}
                               style={{
