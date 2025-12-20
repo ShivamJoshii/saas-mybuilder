@@ -372,6 +372,8 @@ export default function Dashboard() {
   const [appointmentsLoading, setAppointmentsLoading] = useState(false);
   const [lastRefreshed, setLastRefreshed] = useState(null);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [sortFrozenAt, setSortFrozenAt] = useState(null);
   const [clinic, setClinic] = useState(null);
   const [appointments, setAppointments] = useState([]);
   const [selectedAppointment, setSelectedAppointment] = useState(null);
@@ -396,6 +398,19 @@ export default function Dashboard() {
     () => ["patient_name", "phone", "appointment_reason", "appointment_day"],
     []
   );
+
+  const filteredAppointments = useMemo(() => {
+    if (!searchQuery.trim()) return appointments;
+
+    const q = searchQuery.toLowerCase();
+
+    return appointments.filter(a =>
+      (a.patient_name || "").toLowerCase().includes(q) ||
+      (a.phone || "").includes(q) ||
+      (a.doctor_name || "").toLowerCase().includes(q) ||
+      (a.status || "").toLowerCase().includes(q)
+    );
+  }, [appointments, searchQuery]);
 
   // Helper to get missing fields for a single row
   const getRowMissingFields = (row) => {
@@ -452,20 +467,27 @@ export default function Dashboard() {
     checkSession();
   }, []);
 
-  const fetchAppointments = async () => {
+  const fetchAppointments = async ({ allowResort = false } = {}) => {
     if (!clinic) return;
     setAppointmentsLoading(true);
 
     const { data, error } = await supabase
       .from("appointments")
       .select("*")
-      .eq("clinic_id", clinic.id)
-      .order("appointment_time", { ascending: true });
+      .eq("clinic_id", clinic.id);
 
-    if (error) {
-      console.error("Failed to fetch appointments:", error);
-    } else {
-      setAppointments(data || []);
+    if (!error && data) {
+      let rows = data;
+
+      // ✅ only sort if allowed
+      if (allowResort || !sortFrozenAt) {
+        rows = [...data].sort((a, b) =>
+          (a.appointment_time || "").localeCompare(b.appointment_time || "")
+        );
+        setSortFrozenAt(Date.now());
+      }
+
+      setAppointments(rows);
     }
 
     setLastRefreshed(new Date());
@@ -476,6 +498,21 @@ export default function Dashboard() {
     if (!clinic) return;
     fetchAppointments();
   }, [clinic]);
+
+  useEffect(() => {
+    if (!sortFrozenAt) return;
+
+    const timer = setTimeout(() => {
+      setAppointments(prev =>
+        [...prev].sort((a, b) =>
+          (a.appointment_time || "").localeCompare(b.appointment_time || "")
+        )
+      );
+      setSortFrozenAt(Date.now());
+    }, 30000); // 30 seconds
+
+    return () => clearTimeout(timer);
+  }, [sortFrozenAt]);
 
   const logout = async () => {
     const raw = localStorage.getItem("session_token");
@@ -502,7 +539,10 @@ export default function Dashboard() {
       return;
     }
 
-    await fetchAppointments();
+    // ✅ update locally, no resort
+    setAppointments(prev =>
+      prev.map(a => a.id === id ? { ...a, ...updates } : a)
+    );
   };
 
   const formatPhone = (value) =>
@@ -1682,9 +1722,37 @@ export default function Dashboard() {
           </h3>
 
           <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", marginTop: 20, marginBottom: 12 }}>
+            <input
+              type="text"
+              placeholder="Search patient, phone, doctor, or status…"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              style={{
+                padding: "0.5rem 0.75rem",
+                borderRadius: 6,
+                border: "1px solid var(--border)",
+                background: "var(--input)",
+                color: "var(--foreground)",
+                fontSize: "0.875rem",
+                width: 260,
+              }}
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery("")}
+                style={{
+                  border: "none",
+                  background: "transparent",
+                  cursor: "pointer",
+                  color: "var(--muted-foreground)"
+                }}
+              >
+                ✕
+              </button>
+            )}
             <button
               className="button"
-              onClick={fetchAppointments}
+              onClick={() => fetchAppointments({ allowResort: true })}
               disabled={appointmentsLoading}
               style={{
                 padding: "0.5rem 1rem",
@@ -1711,13 +1779,15 @@ export default function Dashboard() {
                 + Add Patient
               </button>
             )}
-            <button
-              className="button"
-              disabled={runningCalls}
-              onClick={runPendingCalls}
-            >
-              {runningCalls ? "Running Calls…" : "Run Pending Calls"}
-            </button>
+            {viewMode === "production" && (
+              <button
+                className="button"
+                disabled={runningCalls}
+                onClick={runPendingCalls}
+              >
+                {runningCalls ? "Running Calls…" : "Run Pending Calls"}
+              </button>
+            )}
             {viewMode === "edit" && (
               <button
                 onClick={deleteAllAppointments}
@@ -1834,7 +1904,7 @@ export default function Dashboard() {
                 </tr>
               </thead>
               <tbody>
-                {appointments.length === 0 ? (
+                {filteredAppointments.length === 0 ? (
                   <tr>
                     <td
                       colSpan="7"
@@ -1844,11 +1914,11 @@ export default function Dashboard() {
                         color: "var(--muted-foreground)",
                       }}
                     >
-                      No appointments uploaded yet.
+                      {searchQuery ? "No appointments match your search." : "No appointments uploaded yet."}
                     </td>
                   </tr>
                 ) : (
-                  appointments.map((a) => (
+                  filteredAppointments.map((a) => (
                     <tr
                       key={a.id}
                       style={{
@@ -1930,43 +2000,43 @@ export default function Dashboard() {
                       </td>
                       <td style={{ padding: "0.75rem" }}>
                         {viewMode === "edit" ? (
-                          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                          <div
+                            onClick={(e) => {
+                              const input = e.currentTarget.querySelector("input");
+                              input?.showPicker?.(); // Chrome / modern browsers
+                              input?.focus();
+                            }}
+                            style={{
+                              cursor: "pointer",
+                            }}
+                          >
                             <input
-                              type="date"
-                              value={getDatePart(a.appointment_time)}
-                              onChange={(e) => {
-                                const date = e.target.value;
-                                const time = getTimePart(a.appointment_time) || "09:00";
-                                updateAppointment(a.id, { appointment_time: `${date} ${time}` });
-                              }}
-                              style={{
-                                padding: "0.4rem",
-                                borderRadius: 6,
-                                border: "1px solid var(--border)",
-                                background: "var(--input)",
-                                color: "var(--foreground)",
-                                fontSize: "0.85rem",
-                              }}
-                            />
+                              type="datetime-local"
+                              value={toDatetimeLocal(a.appointment_time)}
+                              onChange={() => {}}
+                              onBlur={(e) => {
+                                const v = e.target.value;
+                                if (!v) return;
 
-                            <input
-                              type="time"
-                              step="60"
-                              value={getTimePart(a.appointment_time)}
-                              onChange={(e) => {
-                                const time = e.target.value;
-                                const date = getDatePart(a.appointment_time);
-                                if (!date) return; // needs date first
-                                updateAppointment(a.id, { appointment_time: `${date} ${time}` });
+                                const formatted = v.replace("T", " ");
+                                if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(formatted)) {
+                                  showToast("Invalid date/time", "error");
+                                  return;
+                                }
+
+                                updateAppointment(a.id, {
+                                  appointment_time: formatted,
+                                });
                               }}
                               style={{
+                                width: "100%",
                                 padding: "0.4rem",
                                 borderRadius: 6,
                                 border: "1px solid var(--border)",
                                 background: "var(--input)",
                                 color: "var(--foreground)",
                                 fontSize: "0.85rem",
-                                width: 110,
+                                cursor: "pointer",
                               }}
                             />
                           </div>
@@ -2081,15 +2151,14 @@ export default function Dashboard() {
         <div
           style={{
             position: "fixed",
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
+            inset: 0,
             background: "rgba(0,0,0,0.5)",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            zIndex: 1000
+            zIndex: 1000,
+            padding: "1rem",
+            overflowY: "auto",
           }}
         >
           <div
@@ -2097,7 +2166,10 @@ export default function Dashboard() {
               background: "white",
               padding: "1.5rem",
               borderRadius: 8,
-              width: 400
+              width: "100%",
+              maxWidth: 420,
+              maxHeight: "90vh",
+              overflowY: "auto",
             }}
           >
             <h3 style={{ marginBottom: 10 }}>Fix Missing Fields</h3>
@@ -2204,23 +2276,25 @@ export default function Dashboard() {
         <div
           style={{
             position: "fixed",
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
+            inset: 0,
             background: "rgba(0,0,0,0.4)",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
             zIndex: 1000,
+            padding: "1rem",
+            overflowY: "auto",
           }}
         >
           <div
             style={{
-              width: 420,
+              width: "100%",
+              maxWidth: 420,
               borderRadius: 8,
               background: "white",
               padding: "1rem",
+              maxHeight: "90vh",
+              overflowY: "auto",
             }}
           >
             <h3

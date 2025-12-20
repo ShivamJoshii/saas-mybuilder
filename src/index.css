@@ -302,3 +302,10 @@ body {
 .form-group:last-child {
   margin-bottom: 0;
 }
+
+/* Prevent iOS/macOS zoom bug on input focus */
+input,
+select,
+textarea {
+  font-size: 16px;
+}
