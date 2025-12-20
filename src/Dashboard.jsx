@@ -510,8 +510,13 @@ export default function Dashboard() {
 
   const toDatetimeLocal = (ts) => {
     if (!ts) return "";
-    // Use stored string, DO NOT convert timezone
-    return ts.replace(" ", "T").slice(0, 16);
+
+    // Expecting "YYYY-MM-DD HH:mm"
+    if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(ts)) {
+      return "";
+    }
+
+    return ts.replace(" ", "T");
   };
 
   const startEdit = (row) => {
@@ -1726,6 +1731,7 @@ export default function Dashboard() {
           <div
             style={{
               overflowX: "auto",
+              overflowY: "visible",
               border: "1px solid var(--border)",
               borderRadius: "var(--radius)",
               marginTop: 12,
@@ -1918,11 +1924,24 @@ export default function Dashboard() {
                           <input
                             type="datetime-local"
                             value={toDatetimeLocal(a.appointment_time)}
-                            onChange={(e) =>
+                            onBlur={(e) => {
+                              const v = e.target.value;
+
+                              // must be full datetime-local value
+                              if (!v) return;
+
+                              // "YYYY-MM-DDTHH:mm" → "YYYY-MM-DD HH:mm"
+                              const formatted = v.replace("T", " ");
+
+                              if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(formatted)) {
+                                showToast("Invalid date/time", "error");
+                                return;
+                              }
+
                               updateAppointment(a.id, {
-                                appointment_time: e.target.value.replace("T", " "),
-                              })
-                            }
+                                appointment_time: formatted,
+                              });
+                            }}
                             style={{
                               padding: "0.4rem",
                               borderRadius: 6,
