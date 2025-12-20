@@ -302,8 +302,3 @@ body {
 .form-group:last-child {
   margin-bottom: 0;
 }
-
-input[type="datetime-local"] {
-  position: relative;
-  z-index: 10;
-}

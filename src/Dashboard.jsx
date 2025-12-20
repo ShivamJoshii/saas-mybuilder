@@ -511,13 +511,23 @@ export default function Dashboard() {
   const toDatetimeLocal = (ts) => {
     if (!ts) return "";
 
-    // Expecting "YYYY-MM-DD HH:mm"
-    if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(ts)) {
-      return "";
+    const s = String(ts).trim();
+
+    // If ISO: "YYYY-MM-DDTHH:mm:ss..." -> take first 16
+    if (s.includes("T")) return s.slice(0, 16);
+
+    // If space: "YYYY-MM-DD HH:mm:ss..." -> convert to "YYYY-MM-DDTHH:mm"
+    if (s.includes(" ")) {
+      const [date, time] = s.split(" ");
+      if (!date || !time) return "";
+      return `${date}T${time.slice(0, 5)}`; // HH:mm
     }
 
-    return ts.replace(" ", "T");
+    return "";
   };
+
+  const getDatePart = (ts) => toDatetimeLocal(ts)?.slice(0, 10) || "";
+  const getTimePart = (ts) => toDatetimeLocal(ts)?.slice(11, 16) || "";
 
   const startEdit = (row) => {
     if (viewMode !== "edit") {
@@ -1731,7 +1741,6 @@ export default function Dashboard() {
           <div
             style={{
               overflowX: "auto",
-              overflowY: "visible",
               border: "1px solid var(--border)",
               borderRadius: "var(--radius)",
               marginTop: 12,
@@ -1921,36 +1930,46 @@ export default function Dashboard() {
                       </td>
                       <td style={{ padding: "0.75rem" }}>
                         {viewMode === "edit" ? (
-                          <input
-                            type="datetime-local"
-                            value={toDatetimeLocal(a.appointment_time)}
-                            onBlur={(e) => {
-                              const v = e.target.value;
+                          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                            <input
+                              type="date"
+                              value={getDatePart(a.appointment_time)}
+                              onChange={(e) => {
+                                const date = e.target.value;
+                                const time = getTimePart(a.appointment_time) || "09:00";
+                                updateAppointment(a.id, { appointment_time: `${date} ${time}` });
+                              }}
+                              style={{
+                                padding: "0.4rem",
+                                borderRadius: 6,
+                                border: "1px solid var(--border)",
+                                background: "var(--input)",
+                                color: "var(--foreground)",
+                                fontSize: "0.85rem",
+                              }}
+                            />
 
-                              // must be full datetime-local value
-                              if (!v) return;
-
-                              // "YYYY-MM-DDTHH:mm" → "YYYY-MM-DD HH:mm"
-                              const formatted = v.replace("T", " ");
-
-                              if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(formatted)) {
-                                showToast("Invalid date/time", "error");
-                                return;
-                              }
-
-                              updateAppointment(a.id, {
-                                appointment_time: formatted,
-                              });
-                            }}
-                            style={{
-                              padding: "0.4rem",
-                              borderRadius: 6,
-                              border: "1px solid var(--border)",
-                              background: "var(--input)",
-                              color: "var(--foreground)",
-                              fontSize: "0.85rem",
-                            }}
-                          />
+                            <input
+                              type="time"
+                              step="60"
+                              value={getTimePart(a.appointment_time)}
+                              onChange={(e) => {
+                                const time = e.target.value;
+                                const date = getDatePart(a.appointment_time);
+                                if (!date) return; // needs date first
+                                updateAppointment(a.id, { appointment_time: `${date} ${time}` });
+                              }}
+                              style={{
+                                padding: "0.4rem",
+                                borderRadius: 6,
+                                border: "1px solid var(--border)",
+                                background: "var(--input)",
+                                color: "var(--foreground)",
+                                fontSize: "0.85rem",
+                                width: 110,
+                              }}
+                            />
+                          </div>
                         ) : (
                           <span>
                             {a.appointment_time
