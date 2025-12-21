@@ -28,10 +28,8 @@ export default function AddPatientForm({ clinicId, onClose, onSaved }) {
     let appointmentTimestamp = null;
 
     if (form.appointment_day && form.appointment_time) {
-      // Build ISO timestamp in clinic local time
-      appointmentTimestamp = new Date(
-        `${form.appointment_day}T${form.appointment_time}`
-      ).toISOString();
+      // Store as local datetime string — NO Date(), NO timezone shift
+      appointmentTimestamp = `${form.appointment_day} ${form.appointment_time}`;
     }
 
     const { error } = await supabase.from("appointments").insert({
@@ -39,7 +37,7 @@ export default function AddPatientForm({ clinicId, onClose, onSaved }) {
       patient_name: form.patient_name,
       phone: form.phone.replace(/\D/g, ""),
       appointment_day: form.appointment_day,
-      appointment_time: appointmentTimestamp, // ✅ FIXED
+      appointment_time: appointmentTimestamp,
       doctor_name: form.doctor_name || null,
       summary: form.appointment_reason || null,
       status: "pending",

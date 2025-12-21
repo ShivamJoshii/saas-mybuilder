@@ -66,6 +66,19 @@ const formatDisplayTime = (ts) => {
   }).format(dt);
 };
 
+const toSpokenName = (name) => {
+  if (!name) return "";
+
+  // Case: "Last, First"
+  if (name.includes(",")) {
+    const [last, first] = name.split(",").map(s => s.trim());
+    return `${first} ${last}`;
+  }
+
+  // Already "First Last"
+  return name;
+};
+
 // Hash token using Web Crypto API (browser-compatible)
 async function hashToken(raw) {
   const encoder = new TextEncoder();
@@ -519,9 +532,9 @@ export default function Dashboard() {
     setAppointmentsLoading(true);
 
     const { data, error } = await supabase
-      .from("appointments")
-      .select("*")
-      .eq("clinic_id", clinic.id)
+        .from("appointments")
+        .select("*")
+        .eq("clinic_id", clinic.id)
       .order("appointment_time", { ascending: true });
 
     if (error) {
@@ -532,7 +545,7 @@ export default function Dashboard() {
 
     setLastRefreshed(new Date());
     setAppointmentsLoading(false);
-  };
+    };
 
   useEffect(() => {
     if (!clinic) return;
@@ -1225,7 +1238,22 @@ export default function Dashboard() {
 
         let fullTimestamp = null;
         if (apptDay && apptTime) {
-          fullTimestamp = `${apptDay} ${apptTime}`;
+          // Convert time to 24-hour format if needed
+          let time24 = apptTime;
+          if (apptTime.includes("AM") || apptTime.includes("PM")) {
+            // Parse AM/PM format
+            const match = apptTime.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+            if (match) {
+              let hours = parseInt(match[1]);
+              const minutes = match[2];
+              const period = match[3].toUpperCase();
+              if (period === "PM" && hours !== 12) hours += 12;
+              if (period === "AM" && hours === 12) hours = 0;
+              time24 = `${hours.toString().padStart(2, "0")}:${minutes}`;
+            }
+          }
+          const localValue = `${apptDay}T${time24}`;
+          fullTimestamp = new Date(localValue);
         }
 
         console.log("FINAL ROW:", r);
@@ -1237,7 +1265,7 @@ export default function Dashboard() {
           phone: r.phone || null,
           doctor_name: r.doctor_name || null,
           appointment_day: apptDay,
-          appointment_time: fullTimestamp, // final corrected timestamp
+          appointment_time: fullTimestamp, // Date object
           summary: r.appointment_reason || null,
           status: "pending"
         };
@@ -1781,8 +1809,8 @@ export default function Dashboard() {
                 ✕
               </button>
             )}
-            <button
-              className="button"
+          <button
+            className="button"
               onClick={fetchAppointments}
               disabled={appointmentsLoading}
               style={{
@@ -1814,10 +1842,10 @@ export default function Dashboard() {
               <button
                 className="button"
                 disabled={runningCalls}
-                onClick={runPendingCalls}
-              >
+            onClick={runPendingCalls}
+          >
                 {runningCalls ? "Running Calls…" : "Run Pending Calls"}
-              </button>
+          </button>
             )}
             {viewMode === "edit" && (
               <button
@@ -2079,7 +2107,7 @@ export default function Dashboard() {
                                 }
 
                                 await updateAppointment(a.id, {
-                                  appointment_time: normalizeToDbTime(v),
+                                  appointment_time: new Date(v),
                                 });
 
                                 // cleanup draft
@@ -2188,20 +2216,20 @@ export default function Dashboard() {
                             Delete
                           </button>
                         ) : (
-                          <button
-                            onClick={() => setSelectedAppointment(a)}
-                            style={{
-                              background: "none",
-                              border: "none",
-                              color: "var(--primary)",
-                              textDecoration: "underline",
-                              cursor: "pointer",
-                              fontSize: "0.875rem",
-                              padding: 0,
-                            }}
-                          >
+                        <button
+                          onClick={() => setSelectedAppointment(a)}
+                          style={{
+                            background: "none",
+                            border: "none",
+                            color: "var(--primary)",
+                            textDecoration: "underline",
+                            cursor: "pointer",
+                            fontSize: "0.875rem",
+                            padding: 0,
+                          }}
+                        >
                             View Call Summary
-                          </button>
+                        </button>
                         )}
                       </td>
                     </tr>
@@ -2256,9 +2284,9 @@ export default function Dashboard() {
             ].map((field) => {
               const isMissing = rowToFix.missing.includes(field);
               const inputStyle = {
-                width: "100%",
-                padding: 8,
-                marginTop: 4,
+                    width: "100%",
+                    padding: 8,
+                    marginTop: 4,
                 border: "1px solid #ccc",
                 borderRadius: 6,
                 cursor: "pointer",
@@ -2314,14 +2342,14 @@ export default function Dashboard() {
                   {!["appointment_day", "appointment_time"].includes(field) && (
                     <input
                       type="text"
-                      value={rowToFix[field] || ""}
-                      onChange={(e) =>
-                        setRowToFix({ ...rowToFix, [field]: e.target.value })
-                      }
+                  value={rowToFix[field] || ""}
+                  onChange={(e) =>
+                    setRowToFix({ ...rowToFix, [field]: e.target.value })
+                  }
                       style={inputStyle}
-                    />
+                />
                   )}
-                </div>
+              </div>
               );
             })}
 
