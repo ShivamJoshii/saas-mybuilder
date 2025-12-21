@@ -29,6 +29,43 @@ const STATUS_COLORS = {
   declined: "#dc2626",                // red
 };
 
+const formatDisplayTime = (ts) => {
+  if (!ts) return "N/A";
+
+  const s = String(ts).trim();
+
+  // supports "YYYY-MM-DD HH:mm" or "YYYY-MM-DDTHH:mm..."
+  let datePart = "";
+  let timePart = "";
+
+  if (s.includes("T")) {
+    [datePart, timePart] = s.split("T");
+  } else if (s.includes(" ")) {
+    [datePart, timePart] = s.split(" ");
+  } else {
+    return s; // fallback
+  }
+
+  timePart = (timePart || "").slice(0, 5); // HH:mm
+
+  const [y, m, d] = datePart.split("-").map(Number);
+  const [hh, mm] = timePart.split(":").map(Number);
+
+  if (!y || !m || !d || Number.isNaN(hh) || Number.isNaN(mm)) return s;
+
+  // Build a UTC date and *format in UTC* so it doesn't shift
+  const dt = new Date(Date.UTC(y, m - 1, d, hh, mm, 0));
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,       // ✅ shows 14:00, 15:00, 09:00
+    timeZone: "UTC",     // ✅ prevents timezone shifting
+  }).format(dt);
+};
+
 // Hash token using Web Crypto API (browser-compatible)
 async function hashToken(raw) {
   const encoder = new TextEncoder();
@@ -1873,7 +1910,7 @@ export default function Dashboard() {
                       color: "var(--foreground)",
                     }}
                   >
-                    Call Summary
+                    Reason
                   </th>
                   <th
                     style={{
@@ -2065,11 +2102,7 @@ export default function Dashboard() {
                             />
                           </div>
                         ) : (
-                          <span>
-                            {a.appointment_time
-                              ? a.appointment_time.replace("T", " ")
-                              : "N/A"}
-                          </span>
+                          <span>{formatDisplayTime(a.appointment_time)}</span>
                         )}
                       </td>
                       <td style={{ padding: "0.75rem" }}>
