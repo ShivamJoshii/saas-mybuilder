@@ -1170,7 +1170,10 @@ export default function Dashboard() {
         await fetch("/.netlify/functions/manual-call", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ appointmentId: pending[i].id }),
+          body: JSON.stringify({
+            appointmentId: pending[i].id,
+            clinicId: clinic.id, // ✅ ADD THIS
+          }),
         });
 
         // 🔥 BUFFER BETWEEN CALLS (2–4 sec ideal)
