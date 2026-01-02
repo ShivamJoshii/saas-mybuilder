@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 import { supabase } from "./lib/supabaseClient";
@@ -30,40 +30,19 @@ const STATUS_COLORS = {
 };
 
 const formatDisplayTime = (ts) => {
-  if (!ts) return "N/A";
+  if (!ts) return "";
 
-  const s = String(ts).trim();
-
-  // supports "YYYY-MM-DD HH:mm" or "YYYY-MM-DDTHH:mm..."
-  let datePart = "";
-  let timePart = "";
-
-  if (s.includes("T")) {
-    [datePart, timePart] = s.split("T");
-  } else if (s.includes(" ")) {
-    [datePart, timePart] = s.split(" ");
-  } else {
-    return s; // fallback
-  }
-
-  timePart = (timePart || "").slice(0, 5); // HH:mm
-
-  const [y, m, d] = datePart.split("-").map(Number);
-  const [hh, mm] = timePart.split(":").map(Number);
-
-  if (!y || !m || !d || Number.isNaN(hh) || Number.isNaN(mm)) return s;
-
-  // Build a UTC date and *format in UTC* so it doesn't shift
-  const dt = new Date(Date.UTC(y, m - 1, d, hh, mm, 0));
+  const d = ts instanceof Date ? ts : new Date(ts);
+  if (Number.isNaN(d.getTime())) return String(ts);
 
   return new Intl.DateTimeFormat(undefined, {
     month: "short",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-    hour12: false,       // ✅ shows 14:00, 15:00, 09:00
-    timeZone: "UTC",     // ✅ prevents timezone shifting
-  }).format(dt);
+    hour12: false,
+    // IMPORTANT: no timeZone: "UTC"
+  }).format(d);
 };
 
 const toSpokenName = (name) => {
@@ -170,6 +149,7 @@ const mapRowToCanonical = (raw) => {
     doctor_name: "",
     health_number: "",
     insurance_number: "",
+    status: "",
   };
 
   // build lookup by normalized key
@@ -225,6 +205,16 @@ const mapRowToCanonical = (raw) => {
     }
     return "";
   };
+
+  out.status = String(get([
+    "status",
+    "appointment_status",
+    "appointmentstatus",
+    "appt_status",
+    "apptstatus",
+    "state",
+    "visit_status",
+  ])).trim();
 
   out.patient_name = get([
     "patient_name",
@@ -413,13 +403,34 @@ const mapRowToCanonical = (raw) => {
   return out;
 };
 
-// choose a matching key for merge
+const normalizeUploadStatus = (s) => {
+  const v = String(s || "").trim().toLowerCase();
+  if (!v) return "";
+  if (v === "confirmed") return "confirmed";
+  if (v === "booked") return "pending";
+  if (v === "cancelled" || v === "canceled") return "cancelled";
+  return "";
+};
+
+// confirmed > pending > (ignore cancelled as a "final status")
+// cancelled is only used to decide filtering/skip-create
+const pickStatus = (existing, incoming) => {
+  const a = normalizeUploadStatus(existing);
+  const b = normalizeUploadStatus(incoming);
+
+  // ✅ cancelled wins (so we can delete it ONLY at Confirm & Save)
+  if (a === "cancelled" || b === "cancelled") return "cancelled";
+
+  if (a === "confirmed" || b === "confirmed") return "confirmed";
+  if (a === "pending" || b === "pending") return "pending";
+
+  return a || b || "";
+};
+
+// choose a matching key for merge (INSURANCE ONLY)
 const keyCandidates = (row) => {
   const keys = [];
   if (row.insurance_number) keys.push(`ins:${row.insurance_number}`);
-  if (row.phone) keys.push(`phone:${row.phone}`);
-  if (row.health_number) keys.push(`health:${row.health_number}`);
-  if (row.patient_name) keys.push(`name:${normName(row.patient_name)}`);
   return keys;
 };
 
@@ -453,6 +464,7 @@ export default function Dashboard() {
   const [completeRows, setCompleteRows] = useState([]);
   const [rowToFix, setRowToFix] = useState(null);
   const [editingIndex, setEditingIndex] = useState(null);
+  const [collapsedDoctors, setCollapsedDoctors] = useState(() => new Set());
 
   const REQUIRED_FIELDS = useMemo(
     () => ["patient_name", "phone", "appointment_reason", "appointment_day"],
@@ -472,12 +484,49 @@ export default function Dashboard() {
     );
   }, [appointments, searchQuery]);
 
+  const groupedAppointments = useMemo(() => {
+    const groups = new Map(); // doctor -> rows[]
+    for (const a of filteredAppointments) {
+      const doc = (a.doctor_name || "— No Doctor —").trim();
+      if (!groups.has(doc)) groups.set(doc, []);
+      groups.get(doc).push(a);
+    }
+
+    // optional: sort groups (No Doctor at bottom)
+    const entries = Array.from(groups.entries());
+    entries.sort((a, b) => {
+      if (a[0] === "— No Doctor —") return 1;
+      if (b[0] === "— No Doctor —") return -1;
+      return a[0].localeCompare(b[0]);
+    });
+
+    return entries;
+  }, [filteredAppointments]);
+
+  const doctorKeys = useMemo(
+    () => groupedAppointments.map(([doc]) => doc),
+    [groupedAppointments]
+  );
+
   // Helper to get missing fields for a single row
   const getRowMissingFields = (row) => {
     return REQUIRED_FIELDS.filter(
       (f) => !row[f] || String(row[f]).trim() === ""
     );
   };
+
+  const toggleDoctor = (doc) => {
+    setCollapsedDoctors(prev => {
+      const next = new Set(prev);
+      if (next.has(doc)) next.delete(doc);
+      else next.add(doc);
+      return next;
+    });
+  };
+
+  const expandAllDoctors = () => setCollapsedDoctors(new Set());
+  const collapseAllDoctors = (doctorKeys) =>
+    setCollapsedDoctors(new Set(doctorKeys));
 
   useEffect(() => {
     const localToken = localStorage.getItem("session_token");
@@ -589,19 +638,16 @@ export default function Dashboard() {
   const toDatetimeLocal = (ts) => {
     if (!ts) return "";
 
-    const s = String(ts).trim();
+    const d = ts instanceof Date ? ts : new Date(ts);
+    if (Number.isNaN(d.getTime())) return "";
 
-    // If ISO: "YYYY-MM-DDTHH:mm:ss..." -> take first 16
-    if (s.includes("T")) return s.slice(0, 16);
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    const hh = String(d.getHours()).padStart(2, "0");
+    const min = String(d.getMinutes()).padStart(2, "0");
 
-    // If space: "YYYY-MM-DD HH:mm:ss..." -> convert to "YYYY-MM-DDTHH:mm"
-    if (s.includes(" ")) {
-      const [date, time] = s.split(" ");
-      if (!date || !time) return "";
-      return `${date}T${time.slice(0, 5)}`; // HH:mm
-    }
-
-    return "";
+    return `${yyyy}-${mm}-${dd}T${hh}:${min}`;
   };
 
   const getDatePart = (ts) => toDatetimeLocal(ts)?.slice(0, 10) || "";
@@ -739,12 +785,42 @@ export default function Dashboard() {
       return;
     }
 
+    // ✅ count in how many different uploaded files each insurance number appears
+    const insuranceSeenInFiles = new Map(); // ins -> Set(fileIndex)
+
+    filesArr.forEach((pf, fileIndex) => {
+      (pf.rows || []).forEach((row) => {
+        if (!row.insurance_number) return;
+        const ins = String(row.insurance_number).trim();
+        if (!ins) return;
+
+        if (!insuranceSeenInFiles.has(ins)) insuranceSeenInFiles.set(ins, new Set());
+        insuranceSeenInFiles.get(ins).add(fileIndex);
+      });
+    });
+
+    // If more than 1 file uploaded, only keep insurance numbers present in 2+ files
+    const keepInsurance = new Set();
+    if (filesArr.length > 1) {
+      for (const [ins, setOfFiles] of insuranceSeenInFiles.entries()) {
+        if (setOfFiles.size >= 2) keepInsurance.add(ins);
+      }
+    }
+
     // 1) merge all rows across files
     const index = new Map(); // key -> mergedRow
     const merged = [];
 
     filesArr.forEach((pf, i) => {
       pf.rows.forEach((row) => {
+        // 🚫 Drop rows without insurance_number completely
+        if (!row.insurance_number) return;
+
+        // ✅ drop people that exist in only one file (extras)
+        if (filesArr.length > 1 && !keepInsurance.has(String(row.insurance_number).trim())) return;
+
+        const incomingStatus = normalizeUploadStatus(row.status);
+
         const keys = keyCandidates(row);
         let existing = null;
         let existingKey = null;
@@ -758,31 +834,27 @@ export default function Dashboard() {
         }
 
         if (!existing) {
-          // new row
-          const newRow = { 
-            id: crypto.randomUUID(),   // <---- ADD THIS
-            ...row 
+          const newRow = {
+            id: crypto.randomUUID(),
+            ...row,
+            status: incomingStatus || row.status || "",
           };
+
           merged.push(newRow);
-          // add all keys to index
           keyCandidates(newRow).forEach((k) => index.set(k, newRow));
         } else {
-          // merge into existing, fill blanks only
+          // merge fields into existing, fill blanks only
           REQUIRED_FIELDS.concat([
             "appointment_time",
             "doctor_name",
             "health_number",
+            "status",
           ]).forEach((f) => {
             if (!existing[f] && row[f]) existing[f] = row[f];
           });
 
-          // refresh index if new identifiers were added
+          existing.status = pickStatus(existing.status, incomingStatus);
           keyCandidates(existing).forEach((k) => index.set(k, existing));
-
-          // If it matched by name but phone now added, keep stable
-          if (existingKey && !index.has(existingKey)) {
-            index.set(existingKey, existing);
-          }
         }
       });
     });
@@ -792,7 +864,8 @@ export default function Dashboard() {
     const seen = new Set();
 
     for (const r of merged) {
-      const key = r.insurance_number || r.phone || r.patient_name;
+      const key = r.insurance_number;
+      if (!key) continue; // safety
       if (!seen.has(key)) {
         seen.add(key);
         unique.push(r);
@@ -978,17 +1051,8 @@ export default function Dashboard() {
         // Build a proper JS Date object
         const jsDate = new Date(`${cleanedDate} ${r.Time}`);
 
-        // Convert to YYYY-MM-DD
-        const yyyy = jsDate.getFullYear();
-        const mm = String(jsDate.getMonth() + 1).padStart(2, "0");
-        const dd = String(jsDate.getDate()).padStart(2, "0");
-
-        // Convert time to HH:MM (24h)
-        const hh = String(jsDate.getHours()).padStart(2, "0");
-        const min = String(jsDate.getMinutes()).padStart(2, "0");
-
-        // FINAL FORMAT → "2025-01-15T14:00"
-        appointmentDateTime = `${yyyy}-${mm}-${dd}T${hh}:${min}`;
+        // Store as ISO UTC instant
+        appointmentDateTime = jsDate.toISOString();
       }
 
       return {
@@ -1221,58 +1285,62 @@ export default function Dashboard() {
     setSaving(true);
 
     try {
-      const payload = completeRows.map((r) => {
-        let apptTime = r.appointment_time || null;
+      const payload = completeRows
+        // ✅ remove cancelled rows ONLY at save time
+        .filter(r => normalizeUploadStatus(r.status) !== "cancelled")
+        .map((r) => {
+          let apptTime = r.appointment_time || null;
 
-        // Fix corrupted strings like "V04:45 PM"
-        if (apptTime && typeof apptTime === "string") {
-          apptTime = apptTime.replace(/^[^\d]*/, ""); // remove leading non-numeric chars
-        }
-
-        // Ensure we have a valid date+time
-        const apptDay = r.appointment_day || null;
-
-        // If we have a day but time is missing or invalid, default to 09:00
-        if (apptDay) {
-          if (!apptTime || !/^\d{1,2}:\d{2}/.test(apptTime)) {
-            apptTime = "09:00 AM";
+          // Fix corrupted strings like "V04:45 PM"
+          if (apptTime && typeof apptTime === "string") {
+            apptTime = apptTime.replace(/^[^\d]*/, ""); // remove leading non-numeric chars
           }
-        }
 
-        let fullTimestamp = null;
-        if (apptDay && apptTime) {
-          // Convert time to 24-hour format if needed
-          let time24 = apptTime;
-          if (apptTime.includes("AM") || apptTime.includes("PM")) {
-            // Parse AM/PM format
-            const match = apptTime.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
-            if (match) {
-              let hours = parseInt(match[1]);
-              const minutes = match[2];
-              const period = match[3].toUpperCase();
-              if (period === "PM" && hours !== 12) hours += 12;
-              if (period === "AM" && hours === 12) hours = 0;
-              time24 = `${hours.toString().padStart(2, "0")}:${minutes}`;
+          // Ensure we have a valid date+time
+          const apptDay = r.appointment_day || null;
+
+          // If we have a day but time is missing or invalid, default to 09:00
+          if (apptDay) {
+            if (!apptTime || !/^\d{1,2}:\d{2}/.test(apptTime)) {
+              apptTime = "09:00 AM";
             }
           }
-          const localValue = `${apptDay}T${time24}`;
-          fullTimestamp = new Date(localValue);
-        }
 
-        console.log("FINAL ROW:", r);
-        console.log("TIMESTAMP:", fullTimestamp);
+          let fullTimestamp = null;
+          if (apptDay && apptTime) {
+            // Convert time to 24-hour format if needed
+            let time24 = apptTime;
+            if (apptTime.includes("AM") || apptTime.includes("PM")) {
+              // Parse AM/PM format
+              const match = apptTime.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+              if (match) {
+                let hours = parseInt(match[1]);
+                const minutes = match[2];
+                const period = match[3].toUpperCase();
+                if (period === "PM" && hours !== 12) hours += 12;
+                if (period === "AM" && hours === 12) hours = 0;
+                time24 = `${hours.toString().padStart(2, "0")}:${minutes}`;
+              }
+            }
+            const localValue = `${apptDay}T${time24}`;
+            fullTimestamp = new Date(localValue);
+          }
 
-        return {
-          clinic_id: clinic.id,
-          patient_name: r.patient_name || null,
-          phone: r.phone || null,
-          doctor_name: r.doctor_name || null,
-          appointment_day: apptDay,
-          appointment_time: fullTimestamp, // Date object
-          summary: r.appointment_reason || null,
-          status: "pending"
-        };
-      });
+          console.log("FINAL ROW:", r);
+          console.log("TIMESTAMP:", fullTimestamp);
+
+          const finalStatus = normalizeUploadStatus(r.status);
+          return {
+            clinic_id: clinic.id,
+            patient_name: r.patient_name || null,
+            phone: r.phone || null,
+            doctor_name: r.doctor_name || null,
+            appointment_day: apptDay,
+            appointment_time: fullTimestamp,
+            summary: r.appointment_reason || null,
+            status: finalStatus === "confirmed" ? "confirmed" : "pending",
+          };
+        });
 
       console.log("FINAL PAYLOAD:", JSON.stringify(payload, null, 2));
 
@@ -1301,6 +1369,16 @@ export default function Dashboard() {
   const startIndex = (currentPage - 1) * itemsPerPage;
   const endIndex = startIndex + itemsPerPage;
   const previewRows = useMemo(() => mergedRows.slice(startIndex, endIndex), [mergedRows, startIndex, endIndex]);
+
+  const groupedPreviewRows = useMemo(() => {
+    const groups = {};
+    for (const r of previewRows) {
+      const key = (r.doctor_name || "— No Doctor —").trim();
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(r);
+    }
+    return Object.entries(groups);
+  }, [previewRows]);
 
   // Reset to page 1 when mergedRows changes
   useEffect(() => {
@@ -1618,25 +1696,25 @@ export default function Dashboard() {
                     </tr>
                   </thead>
                   <tbody>
-                    {previewRows.map((r, i) => (
-                      <tr key={i} style={{ borderBottom: "1px solid var(--border)" }}>
-                        <td style={{ padding: "0.6rem" }}>
-                          {r.patient_name || "—"}
-                        </td>
-                        <td style={{ padding: "0.6rem" }}>{r.phone || "—"}</td>
-                        <td style={{ padding: "0.6rem" }}>
-                          {r.appointment_reason || "—"}
-                        </td>
-                        <td style={{ padding: "0.6rem" }}>
-                          {r.appointment_day || "—"}
-                        </td>
-                        <td style={{ padding: "0.6rem" }}>
-                          {r.appointment_time || "—"}
-                        </td>
-                        <td style={{ padding: "0.6rem" }}>
-                          {r.doctor_name || "—"}
-                        </td>
-                      </tr>
+                    {groupedPreviewRows.map(([doc, rows]) => (
+                      <Fragment key={doc}>
+                        <tr style={{ background: "var(--muted)" }}>
+                          <td colSpan={6} style={{ padding: "0.6rem", fontWeight: 700 }}>
+                            {doc}
+                          </td>
+                        </tr>
+
+                        {rows.map((r, i) => (
+                          <tr key={`${doc}-${i}`} style={{ borderBottom: "1px solid var(--border)" }}>
+                            <td style={{ padding: "0.6rem" }}>{r.patient_name || "—"}</td>
+                            <td style={{ padding: "0.6rem" }}>{r.phone || "—"}</td>
+                            <td style={{ padding: "0.6rem" }}>{r.appointment_reason || "—"}</td>
+                            <td style={{ padding: "0.6rem" }}>{r.appointment_day || "—"}</td>
+                            <td style={{ padding: "0.6rem" }}>{r.appointment_time || "—"}</td>
+                            <td style={{ padding: "0.6rem" }}>{r.doctor_name || "—"}</td>
+                          </tr>
+                        ))}
+                      </Fragment>
                     ))}
                   </tbody>
                 </table>
@@ -1980,263 +2058,282 @@ export default function Dashboard() {
                     </td>
                   </tr>
                 ) : (
-                  filteredAppointments.map((a) => (
-                    <tr
-                      key={a.id}
-                      style={{
-                        borderBottom: "1px solid var(--border)",
-                        transition: "background 0.2s",
-                      }}
-                      onMouseEnter={(e) =>
-                        (e.currentTarget.style.background = "var(--muted)")
-                      }
-                      onMouseLeave={(e) =>
-                        (e.currentTarget.style.background = "transparent")
-                      }
-                    >
-                      <td style={{ padding: "0.75rem" }}>
-                        {viewMode === "edit" ? (
-                          <input
-                            defaultValue={a.patient_name || ""}
-                            placeholder="Patient name"
-                            onKeyDown={async (e) => {
-                              if (e.key === "Enter") {
-                                e.preventDefault();
-                                e.currentTarget.blur(); // 🔥 triggers onBlur
-                              }
-                            }}
-                            onBlur={async (e) => {
-                              const name = e.target.value.trim();
+                  groupedAppointments.map(([doc, rows]) => {
+                    const isCollapsed = collapsedDoctors.has(doc);
 
-                              // ⛔ Block empty names
-                              if (!name) {
-                                showToast("Patient name cannot be empty", "error");
-                                e.target.value = a.patient_name || "";
-                                return;
-                              }
-
-                              await updateAppointment(a.id, { patient_name: name });
-                            }}
-                            style={{
-                              width: 160,
-                              padding: "0.4rem",
-                              borderRadius: 6,
-                              border: "1px solid var(--border)",
-                              background: "var(--input)",
-                              color: "var(--foreground)",
-                              fontSize: "0.85rem",
-                            }}
-                          />
-                        ) : (
-                          <span>{a.patient_name || "N/A"}</span>
-                        )}
-                      </td>
-                      <td style={{ padding: "0.75rem" }}>
-                        {viewMode === "edit" ? (
-                          <input
-                            defaultValue={a.phone || ""}
-                            placeholder="10-digit phone"
-                            onChange={(e) => {
-                              e.target.value = e.target.value.replace(/\D/g, "").slice(0, 10);
-                            }}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") {
-                                e.preventDefault();
-                                e.currentTarget.blur(); // 🔥 save on Enter
-                              }
-                            }}
-                            onBlur={async (e) => {
-                              const digits = e.target.value.replace(/\D/g, "");
-
-                              // ⛔ Don't save invalid phone
-                              if (digits.length !== 10) {
-                                showToast("Phone must be exactly 10 digits", "error");
-                                e.target.value = a.phone || "";
-                                return;
-                              }
-
-                              await updateAppointment(a.id, { phone: digits });
-                            }}
-                            style={{
-                              width: 120,
-                              padding: "0.4rem",
-                              borderRadius: 6,
-                              border: "1px solid var(--border)",
-                              background: "var(--input)",
-                              color: "var(--foreground)",
-                              fontSize: "0.85rem",
-                            }}
-                          />
-                        ) : (
-                          <span>{a.phone || "N/A"}</span>
-                        )}
-                      </td>
-                      <td style={{ padding: "0.75rem" }}>
-                        {viewMode === "edit" ? (
-                          <div
-                            onClick={(e) => {
-                              e.preventDefault();
-                              const input = e.currentTarget.querySelector("input");
-                              if (!input) return;
-                              input.focus();
-                              input.showPicker?.();
-                            }}
-                            style={{ cursor: "pointer", minWidth: 180 }}
-                          >
-                            <input
-                              type="datetime-local"
-                              value={
-                                editDraft[a.id]?.appointment_time ??
-                                toDatetimeLocal(a.appointment_time)
-                              }
-                              onChange={(e) => {
-                                const v = e.target.value;
-                                setEditDraft(prev => ({
-                                  ...prev,
-                                  [a.id]: {
-                                    ...(prev[a.id] || {}),
-                                    appointment_time: v,
-                                  }
-                                }));
-                              }}
-                              onBlur={async () => {
-                                const v = editDraft[a.id]?.appointment_time;
-                                if (!v) return;
-
-                                // strict validation
-                                if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(v)) {
-                                  showToast("Invalid date/time", "error");
-                                  return;
-                                }
-
-                                await updateAppointment(a.id, {
-                                  appointment_time: new Date(v),
-                                });
-
-                                // cleanup draft
-                                setEditDraft(prev => {
-                                  const copy = { ...prev };
-                                  delete copy[a.id];
-                                  return copy;
-                                });
-                              }}
+                    return (
+                      <Fragment key={doc}>
+                        {/* Doctor header row (dropdown trigger) */}
+                        <tr style={{ background: "var(--muted)" }}>
+                          <td colSpan={7} style={{ padding: "0.75rem" }}>
+                            <button
+                              type="button"
+                              onClick={() => toggleDoctor(doc)}
                               style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 10,
                                 width: "100%",
-                                padding: "0.4rem",
-                                borderRadius: 6,
-                                border: "1px solid var(--border)",
-                                background: "var(--input)",
-                                color: "var(--foreground)",
-                                fontSize: "0.85rem",
+                                background: "transparent",
+                                border: "none",
                                 cursor: "pointer",
+                                padding: 0,
+                                fontWeight: 700,
+                                color: "var(--foreground)",
                               }}
-                            />
-                          </div>
-                        ) : (
-                          <span>{formatDisplayTime(a.appointment_time)}</span>
-                        )}
-                      </td>
-                      <td style={{ padding: "0.75rem" }}>
-                        {a.doctor_name || "N/A"}
-                      </td>
-                      <td style={{ padding: "0.75rem", maxWidth: 260 }}>
-                        {a.summary ? (
-                          <span
-                            style={{
-                              display: "inline-block",
-                              whiteSpace: "nowrap",
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                              maxWidth: 240,
-                              verticalAlign: "bottom",
-                            }}
-                            title={a.summary} // hover shows full text
-                          >
-                            {a.summary}
-                          </span>
-                        ) : (
-                          <span style={{ color: "var(--muted-foreground)" }}>
-                            —
-                          </span>
-                        )}
-                      </td>
-                      <td style={{ padding: "0.75rem" }}>
-                        {viewMode === "edit" ? (
-                          <select
-                            value={a.status || "pending"}
-                            onChange={(e) =>
-                              updateAppointment(a.id, { status: e.target.value })
-                            }
-                            style={{
-                              padding: "0.4rem 0.6rem",
-                              borderRadius: 6,
-                              border: "1px solid var(--border)",
-                              background: STATUS_COLORS[a.status || "pending"],
-                              color: ["confirmed", "declined", "reschedule_requested"].includes(a.status)
-                                ? "white"
-                                : "#111827",
-                              fontSize: "0.85rem",
-                              fontWeight: 500,
-                              cursor: "pointer",
-                            }}
-                          >
-                            {STATUS_OPTIONS.map(opt => (
-                              <option key={opt.value} value={opt.value}>
-                                {opt.label}
-                              </option>
-                            ))}
-                          </select>
-                        ) : (
-                          <span
-                            style={{
-                              padding: "4px 8px",
-                              borderRadius: 999,
-                              background: STATUS_COLORS[a.status || "pending"],
-                              color: ["confirmed", "declined", "reschedule_requested"].includes(a.status)
-                                ? "white"
-                                : "#111827",
-                              fontSize: "0.75rem",
-                              fontWeight: 600,
-                              display: "inline-block",
-                            }}
-                          >
-                            {STATUS_OPTIONS.find(s => s.value === a.status)?.label || "Pending"}
-                          </span>
-                        )}
-                      </td>
-                      <td style={{ padding: "0.75rem" }}>
-                        {viewMode === "edit" ? (
-                          <button
-                            onClick={() => deleteRow(a.id)}
-                            style={{
-                              background: "transparent",
-                              border: "1px solid var(--border)",
-                              padding: "4px 8px",
-                              borderRadius: 6,
-                              cursor: "pointer",
-                            }}
-                          >
-                            Delete
-                          </button>
-                        ) : (
-                        <button
-                          onClick={() => setSelectedAppointment(a)}
-                          style={{
-                            background: "none",
-                            border: "none",
-                            color: "var(--primary)",
-                            textDecoration: "underline",
-                            cursor: "pointer",
-                            fontSize: "0.875rem",
-                            padding: 0,
-                          }}
-                        >
-                            View Call Summary
-                        </button>
-                        )}
-                      </td>
-                    </tr>
-                  ))
+                            >
+                              <span style={{ width: 18, display: "inline-block" }}>
+                                {isCollapsed ? "▶" : "▼"}
+                              </span>
+                              <span>{doc}</span>
+                              <span style={{ marginLeft: "auto", fontWeight: 600, color: "var(--muted-foreground)" }}>
+                                {rows.length}
+                              </span>
+                            </button>
+                          </td>
+                        </tr>
+
+                        {/* Doctor rows */}
+                        {!isCollapsed &&
+                          rows.map((a) => (
+                            <tr
+                              key={a.id}
+                              style={{
+                                borderBottom: "1px solid var(--border)",
+                                transition: "background 0.2s",
+                              }}
+                              onMouseEnter={(e) => (e.currentTarget.style.background = "var(--muted)")}
+                              onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                            >
+                              {/* Patient */}
+                              <td style={{ padding: "0.75rem" }}>
+                                {viewMode === "edit" ? (
+                                  <input
+                                    defaultValue={a.patient_name || ""}
+                                    placeholder="Patient name"
+                                    onKeyDown={async (e) => {
+                                      if (e.key === "Enter") {
+                                        e.preventDefault();
+                                        e.currentTarget.blur();
+                                      }
+                                    }}
+                                    onBlur={async (e) => {
+                                      const name = e.target.value.trim();
+                                      if (!name) {
+                                        showToast("Patient name cannot be empty", "error");
+                                        e.target.value = a.patient_name || "";
+                                        return;
+                                      }
+                                      await updateAppointment(a.id, { patient_name: name });
+                                    }}
+                                    style={{
+                                      width: 160,
+                                      padding: "0.4rem",
+                                      borderRadius: 6,
+                                      border: "1px solid var(--border)",
+                                      background: "var(--input)",
+                                      color: "var(--foreground)",
+                                      fontSize: "0.85rem",
+                                    }}
+                                  />
+                                ) : (
+                                  <span>{a.patient_name || "N/A"}</span>
+                                )}
+                              </td>
+
+                              {/* Phone */}
+                              <td style={{ padding: "0.75rem" }}>
+                                {viewMode === "edit" ? (
+                                  <input
+                                    defaultValue={a.phone || ""}
+                                    placeholder="10-digit phone"
+                                    onChange={(e) => {
+                                      e.target.value = e.target.value.replace(/\D/g, "").slice(0, 10);
+                                    }}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter") {
+                                        e.preventDefault();
+                                        e.currentTarget.blur();
+                                      }
+                                    }}
+                                    onBlur={async (e) => {
+                                      const digits = e.target.value.replace(/\D/g, "");
+                                      if (digits.length !== 10) {
+                                        showToast("Phone must be exactly 10 digits", "error");
+                                        e.target.value = a.phone || "";
+                                        return;
+                                      }
+                                      await updateAppointment(a.id, { phone: digits });
+                                    }}
+                                    style={{
+                                      width: 120,
+                                      padding: "0.4rem",
+                                      borderRadius: 6,
+                                      border: "1px solid var(--border)",
+                                      background: "var(--input)",
+                                      color: "var(--foreground)",
+                                      fontSize: "0.85rem",
+                                    }}
+                                  />
+                                ) : (
+                                  <span>{a.phone || "N/A"}</span>
+                                )}
+                              </td>
+
+                              {/* Time */}
+                              <td style={{ padding: "0.75rem" }}>
+                                {viewMode === "edit" ? (
+                                  <div
+                                    onClick={(e) => {
+                                      e.preventDefault();
+                                      const input = e.currentTarget.querySelector("input");
+                                      if (!input) return;
+                                      input.focus();
+                                      input.showPicker?.();
+                                    }}
+                                    style={{ cursor: "pointer", minWidth: 180 }}
+                                  >
+                                    <input
+                                      type="datetime-local"
+                                      key={`${a.id}-${a.appointment_time || ""}`}
+                                      defaultValue={toDatetimeLocal(a.appointment_time)}
+                                      onBlur={async (e) => {
+                                        const v = e.target.value;
+                                        if (!v) {
+                                          e.target.value = toDatetimeLocal(a.appointment_time);
+                                          return;
+                                        }
+                                        if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(v)) {
+                                          showToast("Invalid date/time", "error");
+                                          e.target.value = toDatetimeLocal(a.appointment_time);
+                                          return;
+                                        }
+                                        await updateAppointment(a.id, {
+                                          appointment_time: normalizeToDbTime(v),
+                                        });
+                                      }}
+                                      style={{
+                                        width: "100%",
+                                        padding: "0.4rem",
+                                        borderRadius: 6,
+                                        border: "1px solid var(--border)",
+                                        background: "var(--input)",
+                                        color: "var(--foreground)",
+                                        fontSize: "0.85rem",
+                                        cursor: "pointer",
+                                      }}
+                                    />
+                                  </div>
+                                ) : (
+                                  <span>{formatDisplayTime(a.appointment_time)}</span>
+                                )}
+                              </td>
+
+                              {/* Doctor */}
+                              <td style={{ padding: "0.75rem" }}>{a.doctor_name || "N/A"}</td>
+
+                              {/* Reason */}
+                              <td style={{ padding: "0.75rem", maxWidth: 260 }}>
+                                {a.summary ? (
+                                  <span
+                                    style={{
+                                      display: "inline-block",
+                                      whiteSpace: "nowrap",
+                                      overflow: "hidden",
+                                      textOverflow: "ellipsis",
+                                      maxWidth: 240,
+                                      verticalAlign: "bottom",
+                                    }}
+                                    title={a.summary}
+                                  >
+                                    {a.summary}
+                                  </span>
+                                ) : (
+                                  <span style={{ color: "var(--muted-foreground)" }}>—</span>
+                                )}
+                              </td>
+
+                              {/* Status */}
+                              <td style={{ padding: "0.75rem" }}>
+                                {viewMode === "edit" ? (
+                                  <select
+                                    value={a.status || "pending"}
+                                    onChange={(e) => updateAppointment(a.id, { status: e.target.value })}
+                                    style={{
+                                      padding: "0.4rem 0.6rem",
+                                      borderRadius: 6,
+                                      border: "1px solid var(--border)",
+                                      background: STATUS_COLORS[a.status || "pending"],
+                                      color: ["confirmed", "declined", "reschedule_requested"].includes(a.status)
+                                        ? "white"
+                                        : "#111827",
+                                      fontSize: "0.85rem",
+                                      fontWeight: 500,
+                                      cursor: "pointer",
+                                    }}
+                                  >
+                                    {STATUS_OPTIONS.map(opt => (
+                                      <option key={opt.value} value={opt.value}>
+                                        {opt.label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                ) : (
+                                  <span
+                                    style={{
+                                      padding: "4px 8px",
+                                      borderRadius: 999,
+                                      background: STATUS_COLORS[a.status || "pending"],
+                                      color: ["confirmed", "declined", "reschedule_requested"].includes(a.status)
+                                        ? "white"
+                                        : "#111827",
+                                      fontSize: "0.75rem",
+                                      fontWeight: 600,
+                                      display: "inline-block",
+                                    }}
+                                  >
+                                    {STATUS_OPTIONS.find(s => s.value === a.status)?.label || "Pending"}
+                                  </span>
+                                )}
+                              </td>
+
+                              {/* Actions */}
+                              <td style={{ padding: "0.75rem" }}>
+                                {viewMode === "edit" ? (
+                                  <button
+                                    onClick={() => deleteRow(a.id)}
+                                    style={{
+                                      background: "transparent",
+                                      border: "1px solid var(--border)",
+                                      padding: "4px 8px",
+                                      borderRadius: 6,
+                                      cursor: "pointer",
+                                    }}
+                                  >
+                                    Delete
+                                  </button>
+                                ) : (
+                                  <button
+                                    onClick={() => setSelectedAppointment(a)}
+                                    style={{
+                                      background: "none",
+                                      border: "none",
+                                      color: "var(--primary)",
+                                      textDecoration: "underline",
+                                      cursor: "pointer",
+                                      fontSize: "0.875rem",
+                                      padding: 0,
+                                    }}
+                                  >
+                                    View Call Summary
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                      </Fragment>
+                    );
+                  })
                 )}
               </tbody>
             </table>

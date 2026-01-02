@@ -28,8 +28,9 @@ export default function AddPatientForm({ clinicId, onClose, onSaved }) {
     let appointmentTimestamp = null;
 
     if (form.appointment_day && form.appointment_time) {
-      // Store as local datetime string — NO Date(), NO timezone shift
-      appointmentTimestamp = `${form.appointment_day} ${form.appointment_time}`;
+      // Build a local datetime and let JS convert to a UTC instant correctly
+      const localValue = `${form.appointment_day}T${form.appointment_time}`; // YYYY-MM-DDTHH:mm
+      appointmentTimestamp = new Date(localValue); // supabase-js will serialize properly
     }
 
     const { error } = await supabase.from("appointments").insert({
