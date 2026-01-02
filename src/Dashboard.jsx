@@ -29,11 +29,20 @@ const STATUS_COLORS = {
   declined: "#dc2626",                // red
 };
 
+const parseAppt = (ts) => {
+  if (!ts) return null;
+  if (typeof ts === "string" && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(ts)) {
+    // treat as LOCAL, not UTC
+    return new Date(ts.replace(" ", "T"));
+  }
+  return new Date(ts);
+};
+
 const formatDisplayTime = (ts) => {
   if (!ts) return "";
 
-  const d = ts instanceof Date ? ts : new Date(ts);
-  if (Number.isNaN(d.getTime())) return String(ts);
+  const d = ts instanceof Date ? ts : parseAppt(ts);
+  if (!d || Number.isNaN(d.getTime())) return String(ts);
 
   return new Intl.DateTimeFormat(undefined, {
     month: "short",
@@ -638,8 +647,8 @@ export default function Dashboard() {
   const toDatetimeLocal = (ts) => {
     if (!ts) return "";
 
-    const d = ts instanceof Date ? ts : new Date(ts);
-    if (Number.isNaN(d.getTime())) return "";
+    const d = ts instanceof Date ? ts : parseAppt(ts);
+    if (!d || Number.isNaN(d.getTime())) return "";
 
     const yyyy = d.getFullYear();
     const mm = String(d.getMonth() + 1).padStart(2, "0");
@@ -2209,7 +2218,7 @@ export default function Dashboard() {
                                           return;
                                         }
                                         await updateAppointment(a.id, {
-                                          appointment_time: normalizeToDbTime(v),
+                                          appointment_time: new Date(v).toISOString(),
                                         });
                                       }}
                                       style={{
