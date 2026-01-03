@@ -664,6 +664,9 @@ export default function Dashboard() {
 
   const normalizeToDbTime = (v) => {
     // v = YYYY-MM-DDTHH:mm
+    // ⚠️ WARNING: Do NOT use this for appointment_time!
+    // Always use ISO format: new Date(v).toISOString()
+    // This format can cause timezone parsing issues with timestamptz columns
     if (!v) return null;
     return v.replace("T", " ");
   };
@@ -1331,8 +1334,8 @@ export default function Dashboard() {
                 time24 = `${hours.toString().padStart(2, "0")}:${minutes}`;
               }
             }
-            const localValue = `${apptDay}T${time24}`;
-            fullTimestamp = new Date(localValue);
+            const localValue = `${apptDay}T${time24}`;      // local Edmonton time
+            fullTimestamp = new Date(localValue).toISOString(); // ✅ store as ISO UTC
           }
 
           console.log("FINAL ROW:", r);
